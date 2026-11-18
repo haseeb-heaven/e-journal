@@ -52,9 +52,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the sequence after restore, preserve timestamp tie ordering, reject timestamps
   that cannot round-trip through storage, and accept valid backups whose
   timestamps predate a system clock change.
-- Import confirmation records the current entry revisions and refuses to restore
-  if another window changed the journal before confirmation. A conflict refreshes
-  the visible journal before another confirmation can be opened.
+- Import confirmation records the revisions of the entries currently displayed
+  and refuses to restore if the journal changed before confirmation. A conflict
+  refreshes the visible journal before another confirmation can be opened.
 - The import confirmation warns before discarding an unsaved draft.
 - Save failures in switch and close confirmations are shown in the UI.
 - Exports and editor loads read entries and tags from consistent database
@@ -73,12 +73,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reverting now requires confirmation before discarding a dirty draft, reloads
   the latest saved entry from SQLite, and remains available when only the stored
   revision changed.
-- External saves no longer make an untouched editor look dirty.
+- External saves no longer make an untouched editor look dirty, and opening an
+  entry reads its latest content and revision from SQLite.
 - Editor widgets get a fresh undo history whenever a different draft is loaded.
 - First-launch schema creation takes an immediate write transaction, so
   concurrent launches cannot race.
 - The journal directory and database use owner-only permissions on Unix.
-- The save shortcut only writes when the editor is dirty.
+- The save shortcut only writes when the editor is dirty, and close requests are
+  evaluated after the editor processes that frame's text input.
 - Non-Unicode command-line arguments produce a usage error instead of a panic.
 - Release builds on Windows attach CLI modes to the parent console while
   preserving redirected output.

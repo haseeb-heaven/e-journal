@@ -255,6 +255,17 @@ mod tests {
     use super::*;
     use crate::model::EntryDraft;
 
+    fn revisions(storage: &Storage) -> Vec<(crate::model::EntryId, i64)> {
+        let mut revisions = storage
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.id, entry.revision))
+            .collect::<Vec<_>>();
+        revisions.sort_unstable_by_key(|(id, _)| *id);
+        revisions
+    }
+
     fn entry(id: i64, title: &str, tags: &[&str]) -> JournalEntry {
         let created = Utc.with_ymd_and_hms(2026, 11, 18, 9, 30, 0).unwrap();
         JournalEntry {
@@ -370,7 +381,7 @@ mod tests {
         .validate()
         .unwrap();
         storage.create_entry(&existing).unwrap();
-        let snapshot = storage.revision_snapshot().unwrap();
+        let snapshot = revisions(&storage);
 
         let another = EntryDraft {
             title: "Saved elsewhere".into(),
@@ -389,7 +400,7 @@ mod tests {
         ));
         assert_eq!(storage.list_entries().unwrap().len(), 2);
 
-        let snapshot = storage.revision_snapshot().unwrap();
+        let snapshot = revisions(&storage);
         apply_import_checked(&mut storage, &imported, &snapshot).unwrap();
         assert_eq!(storage.list_entries().unwrap()[0].title, "Restored");
     }

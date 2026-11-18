@@ -515,12 +515,28 @@ impl EJournalApp {
     }
 
     fn open_entry(&mut self, id: EntryId) {
-        if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
-            self.selected_id = Some(id);
-            self.base_entry = Some(entry.clone());
-            self.is_new = false;
-            self.draft = EntryDraft::from_entry(entry);
-            self.editor_generation = self.editor_generation.wrapping_add(1);
+        match self.storage.get_entry(id) {
+            Ok(Some(entry)) => {
+                self.selected_id = Some(id);
+                self.base_entry = Some(entry.clone());
+                self.is_new = false;
+                self.draft = EntryDraft::from_entry(&entry);
+                self.editor_generation = self.editor_generation.wrapping_add(1);
+                if let Err(error) = self.refresh_data() {
+                    self.notice = Some(Notice::error(format!(
+                        "Loaded the entry, but the journal list could not refresh: {error}"
+                    )));
+                }
+            }
+            Ok(None) => {
+                self.notice = Some(Notice::error("That entry is no longer in the journal."));
+                self.reload_data();
+            }
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not load that entry. Your current draft is unchanged. {error}"
+                )));
+            }
         }
     }
 
@@ -573,14 +589,7 @@ impl EJournalApp {
                 self.editor_generation = self.editor_generation.wrapping_add(1);
                 self.focus_title = true;
             }
-            EditorTarget::Entry(id) => {
-                if self.entries.iter().any(|entry| entry.id == id) {
-                    self.open_entry(id);
-                } else {
-                    self.notice = Some(Notice::error("That entry is no longer in the journal."));
-                    self.reload_data();
-                }
-            }
+            EditorTarget::Entry(id) => self.open_entry(id),
         }
     }
 
@@ -821,16 +830,12 @@ impl EJournalApp {
                     )));
                     return;
                 }
-                let expected_revisions = match self.storage.revision_snapshot() {
-                    Ok(revisions) => revisions,
-                    Err(error) => {
-                        self.notice = Some(Notice::error(format!(
-                            "Could not verify the current journal, so the import was not \
-                             opened. Your journal was not changed. {error}"
-                        )));
-                        return;
-                    }
-                };
+                let mut expected_revisions = self
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.id, entry.revision))
+                    .collect::<Vec<_>>();
+                expected_revisions.sort_unstable_by_key(|(id, _)| *id);
                 let file_name = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -1983,8 +1988,6 @@ impl EJournalApp {
 impl EJournalApp {
     fn show_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        self.handle_close_request(&ctx);
-
         let mut actions = Vec::new();
         self.handle_shortcuts(&ctx, &mut actions);
 
@@ -2013,6 +2016,9 @@ impl EJournalApp {
                 self.draw_central(ui, &mut actions);
             });
 
+        // Check after the editor has processed this frame's text input so a
+        // first edit cannot be lost with the close request.
+        self.handle_close_request(&ctx);
         self.draw_modals(&ctx, &mut actions);
 
         for action in actions {
@@ -2384,6 +2390,36 @@ mod tests {
     }
 
     #[test]
+    fn opening_an_entry_reads_the_latest_revision() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let base = app.base_entry.as_ref().unwrap().revision;
+
+        let external = EntryDraft {
+            title: "Saved elsewhere".into(),
+            body: "Newest body.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        let external_entry = app.storage.update_entry(id, base, &external).unwrap();
+
+        app.open_entry(id);
+
+        assert_eq!(app.draft.title, "Saved elsewhere");
+        assert_eq!(
+            app.base_entry.as_ref().unwrap().revision,
+            external_entry.revision
+        );
+        assert_eq!(app.entries[0].title, "Saved elsewhere");
+        app.draft.title = "Edited after reload".into();
+        app.save_current().unwrap();
+        assert_eq!(app.entries[0].title, "Edited after reload");
+    }
+
+    #[test]
     fn external_save_does_not_dirty_an_untouched_draft() {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
@@ -2481,7 +2517,12 @@ mod tests {
     fn import_conflict_refreshes_the_visible_journal() {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
-        let expected_revisions = app.storage.revision_snapshot().unwrap();
+        let mut expected_revisions = app
+            .entries
+            .iter()
+            .map(|entry| (entry.id, entry.revision))
+            .collect::<Vec<_>>();
+        expected_revisions.sort_unstable_by_key(|(id, _)| *id);
 
         let external = EntryDraft {
             title: "Saved elsewhere".into(),

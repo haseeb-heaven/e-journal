@@ -405,13 +405,6 @@ impl Storage {
         Ok(tags)
     }
 
-    /// Capture the ids and revisions the UI is showing before a destructive
-    /// action. A restore must compare against this snapshot inside its
-    /// transaction.
-    pub fn revision_snapshot(&self) -> Result<Vec<(EntryId, i64)>, StorageError> {
-        revision_snapshot_from(&self.conn)
-    }
-
     /// Replace every stored entry (used by backup restore) in a single
     /// transaction. IDs and timestamps are preserved when they are safely
     /// below the storage limit; otherwise IDs are remapped to leave room for
