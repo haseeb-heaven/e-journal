@@ -5,7 +5,7 @@
 //! itself runs in one SQLite transaction.
 
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +17,7 @@ use crate::storage::{Storage, StorageError};
 
 pub const BACKUP_FORMAT: &str = "e-journal-backup";
 pub const BACKUP_VERSION: u32 = 1;
+pub const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum BackupError {
@@ -33,6 +34,16 @@ pub enum BackupError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("The backup was written to {path}, but its folder could not be synced: {source}")]
+    SyncDirectory {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("The backup file at {path} is larger than the supported limit of {limit} bytes.")]
+    TooLarge { path: String, limit: u64 },
 
     #[error("This file is not valid Journal backup JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
@@ -175,9 +186,33 @@ pub fn parse(json: &str) -> Result<Vec<JournalEntry>, BackupError> {
 
 /// Read and validate a backup file. The journal database is not touched.
 pub fn read_backup(path: &Path) -> Result<Vec<JournalEntry>, BackupError> {
-    let json = std::fs::read_to_string(path).map_err(|source| BackupError::ReadFile {
+    read_backup_with_limit(path, MAX_BACKUP_BYTES)
+}
+
+fn read_backup_with_limit(path: &Path, limit: u64) -> Result<Vec<JournalEntry>, BackupError> {
+    let file = std::fs::File::open(path).map_err(|source| BackupError::ReadFile {
         path: path.display().to_string(),
         source,
+    })?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| BackupError::ReadFile {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(BackupError::TooLarge {
+            path: path.display().to_string(),
+            limit,
+        });
+    }
+    let json = String::from_utf8(bytes).map_err(|_| BackupError::ReadFile {
+        path: path.display().to_string(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the backup file is not valid UTF-8",
+        ),
     })?;
     parse(&json)
 }
@@ -227,6 +262,22 @@ pub fn write_backup(path: &Path, entries: &[JournalEntry]) -> Result<(), BackupE
             path: path.display().to_string(),
             source: error.error,
         })?;
+    sync_parent_directory(parent, path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path, path: &Path) -> Result<(), BackupError> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| BackupError::SyncDirectory {
+            path: path.display().to_string(),
+            source,
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path, _path: &Path) -> Result<(), BackupError> {
     Ok(())
 }
 
@@ -277,6 +328,17 @@ mod tests {
             updated_at: created,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn read_backup_enforces_a_size_limit() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("oversized.json");
+        std::fs::write(&path, "12345678901").unwrap();
+
+        let error = read_backup_with_limit(&path, 10).unwrap_err();
+
+        assert!(matches!(error, BackupError::TooLarge { limit: 10, .. }));
     }
 
     #[test]

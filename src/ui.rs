@@ -8,8 +8,8 @@ use chrono::{DateTime, Datelike, Local, Utc};
 use eframe::CreationContext;
 use egui::{
     Align, Align2, Button, Color32, ComboBox, CornerRadius, FontId, Frame, Id, Key,
-    KeyboardShortcut, Label, Layout, Margin, Modifiers, Response, RichText, ScrollArea, Sense,
-    Stroke, TextEdit, TextStyle, Ui, ViewportCommand,
+    KeyboardShortcut, Label, Layout, Margin, Modifiers, Response, RichText, Role, ScrollArea,
+    Sense, Stroke, TextEdit, TextStyle, Ui, ViewportCommand, WidgetInfo,
 };
 
 use crate::backup;
@@ -2241,6 +2241,10 @@ fn primary_button(ui: &mut Ui, label: &str, palette: &Palette, width: f32) -> Re
 fn entry_row(ui: &mut Ui, entry: &JournalEntry, selected: bool, palette: &Palette) -> Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 62.0), Sense::click());
+    let accessible_title = entry.title.clone();
+    response.widget_info(|| {
+        WidgetInfo::selected(Role::ListItem, true, selected, accessible_title.clone())
+    });
 
     if ui.is_rect_visible(rect) {
         let fill = if selected {

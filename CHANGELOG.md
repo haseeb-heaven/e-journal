@@ -36,12 +36,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Backups are written through a private temporary file and atomically replace
-  the destination, so a failed export cannot truncate an existing backup.
+  the destination, so a failed export cannot truncate an existing backup. On
+  Unix the destination folder is synced after the rename so a reported success
+  survives a power loss.
 - Export reads its snapshot after the destination is chosen, refuses to write
   over the active database or its SQLite sidecar files (including alternate case
   spellings on case-insensitive volumes), and empty journals can still be
   exported as empty backups.
-- Backup files use owner-only permissions on Unix.
+- Backup files use owner-only permissions on Unix. Imports are bounded to 64 MiB
+  and stop reading oversized files instead of loading them into memory.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
   backwards.
@@ -69,6 +72,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately, and failed settings writes are
   reported and can be retried by selecting the same option again.
+- Sidebar rows expose the full entry title and selected state to accessibility
+  APIs instead of painting an unlabeled clickable rectangle.
 - Search prepares query terms once, skips text folding for empty queries, filters
   cached entries, caches the matching row indices, and the sidebar virtualizes
   fixed-height rows instead of scanning and drawing the whole journal every

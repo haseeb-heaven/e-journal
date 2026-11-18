@@ -107,9 +107,9 @@ The exact path is shown in **Settings → Your data**.
 ## Backups
 
 - **Export** writes a complete, versioned JSON snapshot to a file you choose.
-- **Import** validates the entire backup before touching the database. A valid
-  backup replaces the current journal inside one SQLite transaction, so a
-  failure leaves the existing data intact.
+- **Import** accepts backups up to 64 MiB and validates the entire file before
+  touching the database. A valid backup replaces the current journal inside one
+  SQLite transaction, so a failure leaves the existing data intact.
 - Backups are ordinary files under your control. This app does not synchronize
   them anywhere.
 
@@ -192,7 +192,7 @@ cargo build
 cargo build --release
 ```
 
-The suite currently includes **69 unit tests** and **7 process-level E2E
+The suite currently includes **70 unit tests** and **7 process-level E2E
 tests** (`assert_cmd`) covering:
 
 - entry validation, tag normalization, search, filters, and CLI parsing;
