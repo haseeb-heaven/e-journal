@@ -263,7 +263,7 @@ struct Palette {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorTarget {
     New,
-    Entry(EntryId),
+    Entry { id: EntryId, revision: i64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,7 +323,7 @@ enum Modal {
 
 enum Action {
     NewEntry,
-    Select(EntryId),
+    Select(EntryId, i64),
     OpenTab(MainTab),
     SetTheme(Theme),
     SetTextSize(TextSize),
@@ -433,8 +433,8 @@ impl EJournalApp {
         match loaded {
             Ok(()) => {
                 if app.open_recent {
-                    if let Some(id) = app.entries.first().map(|entry| entry.id) {
-                        app.open_entry(id);
+                    if let Some(entry) = app.entries.first() {
+                        app.open_entry(entry.id, entry.revision);
                     }
                 }
             }
@@ -514,8 +514,15 @@ impl EJournalApp {
         }
     }
 
-    fn open_entry(&mut self, id: EntryId) {
+    fn open_entry(&mut self, id: EntryId, expected_revision: i64) {
         match self.storage.get_entry(id) {
+            Ok(Some(entry)) if entry.revision != expected_revision => {
+                self.notice = Some(Notice::info(
+                    "That entry changed in another window. The journal was refreshed; \
+                     select the entry again.",
+                ));
+                self.reload_data();
+            }
             Ok(Some(entry)) => {
                 self.selected_id = Some(id);
                 self.base_entry = Some(entry.clone());
@@ -540,11 +547,25 @@ impl EJournalApp {
         }
     }
 
+    #[cfg(test)]
+    fn open_entry_cached(&mut self, id: EntryId) {
+        let revision = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .expect("entry in cache")
+            .revision;
+        self.open_entry(id, revision);
+    }
+
     fn current_target(&self) -> Option<EditorTarget> {
         if self.is_new {
             Some(EditorTarget::New)
         } else {
-            self.selected_id.map(EditorTarget::Entry)
+            self.selected_id.map(|id| EditorTarget::Entry {
+                id,
+                revision: self.base_entry.as_ref().map_or(0, |entry| entry.revision),
+            })
         }
     }
 
@@ -589,7 +610,7 @@ impl EJournalApp {
                 self.editor_generation = self.editor_generation.wrapping_add(1);
                 self.focus_title = true;
             }
-            EditorTarget::Entry(id) => self.open_entry(id),
+            EditorTarget::Entry { id, revision } => self.open_entry(id, revision),
         }
     }
 
@@ -774,11 +795,6 @@ impl EJournalApp {
                 return;
             }
         };
-        if entries.is_empty() {
-            self.notice = Some(Notice::info("There are no entries to export yet."));
-            return;
-        }
-
         let default_name = format!("journal-backup-{}.json", Local::now().format("%Y-%m-%d"));
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Journal backup", &["json"])
@@ -823,19 +839,17 @@ impl EJournalApp {
 
         match backup::read_backup(&path) {
             Ok(entries) => {
-                if let Err(error) = self.refresh_data() {
-                    self.notice = Some(Notice::error(format!(
-                        "Could not refresh the journal before opening the import. \
-                         Your journal was not changed. {error}"
-                    )));
-                    return;
-                }
-                let mut expected_revisions = self
-                    .entries
-                    .iter()
-                    .map(|entry| (entry.id, entry.revision))
-                    .collect::<Vec<_>>();
-                expected_revisions.sort_unstable_by_key(|(id, _)| *id);
+                let expected_revisions = match self.storage.revision_snapshot() {
+                    Ok(revisions) => revisions,
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "Could not read the current journal revisions, so the import \
+                             was not opened. Your journal was not changed. {error}"
+                        )));
+                        return;
+                    }
+                };
+                let refresh_error = self.refresh_data().err();
                 let file_name = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -846,6 +860,12 @@ impl EJournalApp {
                     file_name,
                     expected_revisions,
                 });
+                if let Some(error) = refresh_error {
+                    self.notice = Some(Notice::error(format!(
+                        "Some journal entries could not be displayed, but the import \
+                         can still replace the journal: {error}"
+                    )));
+                }
             }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
@@ -911,9 +931,9 @@ impl EJournalApp {
                 self.tab = MainTab::Entry;
                 self.request_switch(EditorTarget::New);
             }
-            Action::Select(id) => {
+            Action::Select(id, revision) => {
                 self.tab = MainTab::Entry;
-                self.request_switch(EditorTarget::Entry(id));
+                self.request_switch(EditorTarget::Entry { id, revision });
             }
             Action::OpenTab(tab) => self.tab = tab,
             Action::SetTheme(theme) => self.set_theme(ctx, theme),
@@ -1186,7 +1206,7 @@ impl EJournalApp {
                     let entry = &self.entries[self.visible_indices[row]];
                     let selected = !self.is_new && self.selected_id == Some(entry.id);
                     if entry_row(ui, entry, selected, &palette).clicked() {
-                        actions.push(Action::Select(entry.id));
+                        actions.push(Action::Select(entry.id, entry.revision));
                     }
                 }
             });
@@ -2222,7 +2242,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let base = app.base_entry.as_ref().unwrap().revision;
 
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -2253,7 +2273,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         app.storage
             .delete_entry(id, app.base_entry.as_ref().unwrap().revision)
             .unwrap();
@@ -2276,7 +2296,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let stale_revision = app.base_entry.as_ref().unwrap().revision;
 
         let external = EntryDraft {
@@ -2312,7 +2332,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         app.draft.body.push_str(" Still editing.");
 
         app.storage
@@ -2365,7 +2385,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let original = app.entries[0].clone();
 
         let same_content = EntryDraft {
@@ -2394,7 +2414,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let base = app.base_entry.as_ref().unwrap().revision;
 
         let external = EntryDraft {
@@ -2406,7 +2426,7 @@ mod tests {
         .unwrap();
         let external_entry = app.storage.update_entry(id, base, &external).unwrap();
 
-        app.open_entry(id);
+        app.open_entry(id, external_entry.revision);
 
         assert_eq!(app.draft.title, "Saved elsewhere");
         assert_eq!(
@@ -2420,11 +2440,39 @@ mod tests {
     }
 
     #[test]
+    fn stale_sidebar_selection_does_not_open_a_changed_entry() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry_cached(id);
+        let base = app.base_entry.as_ref().unwrap().revision;
+
+        let external = EntryDraft {
+            title: "External title".into(),
+            body: "Changed elsewhere.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.update_entry(id, base, &external).unwrap();
+        let stale_revision = app.entries[0].revision;
+
+        app.open_entry(id, stale_revision);
+
+        assert_eq!(app.draft.title, "A test entry");
+        assert_eq!(app.entries[0].title, "External title");
+        assert!(matches!(
+            app.notice.as_ref().map(|notice| &notice.kind),
+            Some(NoticeKind::Info)
+        ));
+    }
+
+    #[test]
     fn external_save_does_not_dirty_an_untouched_draft() {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let base = app.base_entry.as_ref().unwrap().revision;
 
         let external = EntryDraft {
@@ -2447,7 +2495,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let base = app.base_entry.as_ref().unwrap().revision;
 
         let external = EntryDraft {
@@ -2476,7 +2524,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let opened = app.editor_generation;
         assert!(opened > 0);
 
@@ -2490,7 +2538,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         let base = app.base_entry.as_ref().unwrap().revision;
 
         let external = EntryDraft {
@@ -2559,7 +2607,7 @@ mod tests {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
-        app.open_entry(id);
+        app.open_entry_cached(id);
         app.draft.title = "Unsaved title".into();
 
         app.apply_action(&ctx, Action::Revert);
@@ -2629,7 +2677,7 @@ mod tests {
         };
         app.refresh_data().unwrap();
         if let Some(id) = app.entries.first().map(|entry| entry.id) {
-            app.open_entry(id);
+            app.open_entry_cached(id);
         }
         app
     }

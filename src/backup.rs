@@ -443,26 +443,19 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn failed_export_preserves_existing_backup() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn failed_export_does_not_replace_a_directory() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("backup.json");
-        write_backup(&path, &[entry(13, "Original", &[])]).unwrap();
-        let original = std::fs::read(&path).unwrap();
-
-        let original_permissions = std::fs::metadata(dir.path()).unwrap().permissions();
-        let mut read_only = original_permissions.clone();
-        read_only.set_mode(0o500);
-        std::fs::set_permissions(dir.path(), read_only).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let sentinel = path.join("keep-me.txt");
+        std::fs::write(&sentinel, "original").unwrap();
 
         let result = write_backup(&path, &[entry(14, "Replacement", &[])]);
 
-        std::fs::set_permissions(dir.path(), original_permissions).unwrap();
         assert!(result.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "original");
     }
 
     #[test]

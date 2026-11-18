@@ -158,16 +158,20 @@ impl SearchFilter {
     /// Match every query term against the title or body (case-insensitive) and
     /// optionally require a tag (case-insensitive).
     pub fn matches(&self, entry: &JournalEntry) -> bool {
-        let title = fold_case(&entry.title);
-        let body = fold_case(&entry.body);
-
-        let query_matches = self.query.split_whitespace().all(|term| {
-            let term = fold_case(term);
-            title.contains(&term) || body.contains(&term)
-        });
-
-        if !query_matches {
-            return false;
+        let terms = self
+            .query
+            .split_whitespace()
+            .map(fold_case)
+            .collect::<Vec<_>>();
+        if !terms.is_empty() {
+            let title = fold_case(&entry.title);
+            let body = fold_case(&entry.body);
+            if !terms
+                .iter()
+                .all(|term| title.contains(term) || body.contains(term))
+            {
+                return false;
+            }
         }
 
         match &self.tag {

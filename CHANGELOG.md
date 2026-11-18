@@ -37,7 +37,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Backups are written through a private temporary file and atomically replace
   the destination, so a failed export cannot truncate an existing backup.
-- Export refuses to write over the active database or its SQLite sidecar files.
+- Export refuses to write over the active database or its SQLite sidecar files,
+  and empty journals can still be exported as empty backups.
 - Backup files use owner-only permissions on Unix.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
@@ -52,9 +53,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the sequence after restore, preserve timestamp tie ordering, reject timestamps
   that cannot round-trip through storage, and accept valid backups whose
   timestamps predate a system clock change.
-- Import confirmation records the revisions of the entries currently displayed
-  and refuses to restore if the journal changed before confirmation. A conflict
-  refreshes the visible journal before another confirmation can be opened.
+- Import confirmation records the current entry revisions without parsing entry
+  timestamps, refuses to restore if the journal changed before confirmation, and
+  still allows recovery from a malformed entry. A conflict refreshes the visible
+  journal before another confirmation can be opened.
 - The import confirmation warns before discarding an unsaved draft.
 - Save failures in switch and close confirmations are shown in the UI.
 - Exports and editor loads read entries and tags from consistent database
@@ -63,9 +65,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately.
-- Search filters cached entries, caches the matching row indices, and the
-  sidebar virtualizes fixed-height rows instead of scanning and drawing the
-  whole journal every frame.
+- Search skips text folding for empty queries, filters cached entries, caches
+  the matching row indices, and the sidebar virtualizes fixed-height rows instead
+  of scanning and drawing the whole journal every frame.
+- Journal refresh loads all entry tags in one query instead of one query per
+  entry.
 - Delete and refresh failures are reported alongside the delete result.
 - Editing an entry removes tag names that are no longer used by any entry, and
   search uses full Unicode case folding.
@@ -75,6 +79,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   revision changed.
 - External saves no longer make an untouched editor look dirty, and opening an
   entry reads its latest content and revision from SQLite.
+- Sidebar selections carry the revision the user saw, so a replaced entry is
+  refreshed instead of opened as a different entry.
 - Editor widgets get a fresh undo history whenever a different draft is loaded.
 - First-launch schema creation takes an immediate write transaction, so
   concurrent launches cannot race.

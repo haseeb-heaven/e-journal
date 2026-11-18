@@ -1,6 +1,6 @@
 //! SQLite persistence: schema versioning and entry CRUD.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -228,9 +228,26 @@ impl Storage {
             raw_entries
         };
 
+        let mut tags_by_entry: HashMap<EntryId, Vec<String>> = HashMap::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT et.entry_id, t.name
+                 FROM entry_tags et
+                 JOIN tags t ON t.id = et.tag_id
+                 ORDER BY et.entry_id, t.name COLLATE NOCASE",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let entry_id: EntryId = row.get(0)?;
+                let name: String = row.get(1)?;
+                tags_by_entry.entry(entry_id).or_default().push(name);
+            }
+        }
+
         let mut entries = Vec::with_capacity(raw_entries.len());
         for raw in raw_entries {
-            entries.push(entry_from_raw(&tx, raw)?);
+            let tags = tags_by_entry.remove(&raw.id).unwrap_or_default();
+            entries.push(entry_from_raw_parts(raw, tags)?);
         }
         tx.commit()?;
         Ok(entries)
@@ -405,6 +422,13 @@ impl Storage {
         Ok(tags)
     }
 
+    /// Read the ids and revisions used to confirm a destructive action. This
+    /// avoids parsing entry timestamps, so a corrupt entry cannot block a
+    /// restore.
+    pub fn revision_snapshot(&self) -> Result<Vec<(EntryId, i64)>, StorageError> {
+        revision_snapshot_from(&self.conn)
+    }
+
     /// Replace every stored entry (used by backup restore) in a single
     /// transaction. IDs and timestamps are preserved when they are safely
     /// below the storage limit; otherwise IDs are remapped to leave room for
@@ -486,6 +510,11 @@ fn entry_by_id(conn: &Connection, id: EntryId) -> Result<Option<JournalEntry>, S
 }
 
 fn entry_from_raw(conn: &Connection, raw: RawEntry) -> Result<JournalEntry, StorageError> {
+    let tags = tags_for_entry(conn, raw.id)?;
+    entry_from_raw_parts(raw, tags)
+}
+
+fn entry_from_raw_parts(raw: RawEntry, tags: Vec<String>) -> Result<JournalEntry, StorageError> {
     let RawEntry {
         id,
         revision,
@@ -512,8 +541,6 @@ fn entry_from_raw(conn: &Connection, raw: RawEntry) -> Result<JournalEntry, Stor
             });
         }
     };
-    let tags = tags_for_entry(conn, id)?;
-
     Ok(JournalEntry {
         id,
         revision,
@@ -1198,6 +1225,9 @@ mod tests {
                 [],
             )
             .unwrap();
+        let snapshot = storage.revision_snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert!(storage.list_entries().is_err());
         let error = storage.list_entries().unwrap_err();
         assert!(matches!(error, StorageError::CorruptTimestamp { .. }));
     }
