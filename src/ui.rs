@@ -339,7 +339,7 @@ enum Action {
 }
 
 /// The native application state.
-pub struct JournalApp {
+pub struct EJournalApp {
     storage: Storage,
     db_path: PathBuf,
     entries: Vec<JournalEntry>,
@@ -361,7 +361,7 @@ pub struct JournalApp {
     allow_close: bool,
 }
 
-impl JournalApp {
+impl EJournalApp {
     pub fn new(cc: &CreationContext<'_>, storage: Storage, db_path: PathBuf) -> Self {
         let mut theme = Theme::Warm;
         let mut text_size = TextSize::Default;
@@ -852,7 +852,7 @@ impl JournalApp {
 
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Journal")
+                RichText::new("E-Journal")
                     .size(25.0)
                     .strong()
                     .color(palette.text),
@@ -1148,7 +1148,7 @@ impl JournalApp {
                 }
 
                 settings_section(ui, "Your data", &palette);
-                ui.label(RichText::new("Journal database").color(palette.text));
+                ui.label(RichText::new("E-Journal database").color(palette.text));
                 Frame::new()
                     .fill(palette.field)
                     .stroke(Stroke::new(1.0, palette.stroke))
@@ -1209,7 +1209,7 @@ impl JournalApp {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.label(
-                            RichText::new(format!("Journal {}", env!("CARGO_PKG_VERSION")))
+                            RichText::new(format!("E-Journal {}", env!("CARGO_PKG_VERSION")))
                                 .strong()
                                 .color(palette.text),
                         );
@@ -1643,7 +1643,7 @@ impl JournalApp {
     }
 }
 
-impl JournalApp {
+impl EJournalApp {
     fn show_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.handle_close_request(&ctx);
@@ -1684,7 +1684,7 @@ impl JournalApp {
     }
 }
 
-impl eframe::App for JournalApp {
+impl eframe::App for EJournalApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show_ui(ui);
     }
@@ -1851,7 +1851,7 @@ mod tests {
         assert_eq!(elide("日本語のタイトル", 3), "日本語…");
     }
 
-    fn test_app(theme: Theme) -> JournalApp {
+    fn test_app(theme: Theme) -> EJournalApp {
         let mut storage = Storage::open_in_memory().unwrap();
         let validated = EntryDraft {
             title: "A test entry".into(),
@@ -1862,7 +1862,7 @@ mod tests {
         .unwrap();
         storage.create_entry(&validated).unwrap();
 
-        let mut app = JournalApp {
+        let mut app = EJournalApp {
             storage,
             db_path: PathBuf::from("/tmp/journal-test.sqlite3"),
             entries: Vec::new(),
@@ -1890,7 +1890,7 @@ mod tests {
         app
     }
 
-    fn render(app: &mut JournalApp) {
+    fn render(app: &mut EJournalApp) {
         let ctx = egui::Context::default();
         configure_context(&ctx, app.theme, app.text_size);
         let input = egui::RawInput {

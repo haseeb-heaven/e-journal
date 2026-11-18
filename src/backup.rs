@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::model::{normalize_tags, EntryDraft, JournalEntry};
 use crate::storage::{Storage, StorageError};
 
-pub const BACKUP_FORMAT: &str = "journal-app-backup";
+pub const BACKUP_FORMAT: &str = "e-journal-backup";
 pub const BACKUP_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
