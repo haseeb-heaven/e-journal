@@ -38,13 +38,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Backups are written through a private temporary file and atomically replace
   the destination, so a failed export cannot truncate an existing backup. On
   Unix the destination folder is synced after the rename so a reported success
-  survives a power loss.
+  survives a power loss. If only that sync fails, the UI says the file was
+  written but may not survive a power loss instead of claiming the export
+  failed.
 - Export reads its snapshot after the destination is chosen, refuses to write
   over the active database or its SQLite sidecar files (including alternate case
   spellings on case-insensitive volumes), and empty journals can still be
   exported as empty backups.
-- Backup files use owner-only permissions on Unix. Imports are bounded to 64 MiB
-  and stop reading oversized files instead of loading them into memory.
+- Backup files use owner-only permissions on Unix. Exports and imports are
+  bounded to 64 MiB, so every backup the app writes can be restored, and
+  oversized imports stop reading instead of loading the file into memory.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
   backwards.

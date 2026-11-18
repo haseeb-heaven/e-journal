@@ -35,6 +35,7 @@ pub enum BackupError {
         source: std::io::Error,
     },
 
+    #[cfg(unix)]
     #[error("The backup was written to {path}, but its folder could not be synced: {source}")]
     SyncDirectory {
         path: String,
@@ -44,6 +45,9 @@ pub enum BackupError {
 
     #[error("The backup file at {path} is larger than the supported limit of {limit} bytes.")]
     TooLarge { path: String, limit: u64 },
+
+    #[error("This journal is too large to export as one backup (limit {limit} bytes).")]
+    ExportTooLarge { limit: u64 },
 
     #[error("This file is not valid Journal backup JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
@@ -222,7 +226,18 @@ fn read_backup_with_limit(path: &Path, limit: u64) -> Result<Vec<JournalEntry>, 
 /// The destination is replaced only after the complete JSON payload has been
 /// written and synced, so a failed export cannot truncate an existing backup.
 pub fn write_backup(path: &Path, entries: &[JournalEntry]) -> Result<(), BackupError> {
+    write_backup_with_limit(path, entries, MAX_BACKUP_BYTES)
+}
+
+fn write_backup_with_limit(
+    path: &Path,
+    entries: &[JournalEntry],
+    limit: u64,
+) -> Result<(), BackupError> {
     let json = export_to_string(entries)?;
+    if json.len() as u64 > limit {
+        return Err(BackupError::ExportTooLarge { limit });
+    }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -328,6 +343,17 @@ mod tests {
             updated_at: created,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn write_backup_enforces_a_size_limit() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("too-large.json");
+
+        let error = write_backup_with_limit(&path, &[entry(1, "Large", &[])], 10).unwrap_err();
+
+        assert!(matches!(error, BackupError::ExportTooLarge { limit: 10 }));
+        assert!(!path.exists());
     }
 
     #[test]

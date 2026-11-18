@@ -857,6 +857,14 @@ impl EJournalApp {
                 )));
             }
             Err(error) => {
+                #[cfg(unix)]
+                if matches!(&error, backup::BackupError::SyncDirectory { .. }) {
+                    self.notice = Some(Notice::error(format!(
+                        "The backup file was written, but its folder could not be synced. \
+                         It may not survive a power loss. {error}"
+                    )));
+                    return;
+                }
                 self.notice = Some(Notice::error(format!(
                     "Could not export the backup: {error}"
                 )));
