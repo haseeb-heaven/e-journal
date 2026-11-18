@@ -4,11 +4,13 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use thiserror::Error;
 
 use crate::model::{
     format_timestamp, parse_timestamp, EntryId, JournalEntry, SearchFilter, ValidatedEntry,
+    MAX_ENTRY_ID,
 };
 
 /// Schema version written to `PRAGMA user_version`.
@@ -76,6 +78,12 @@ pub enum StorageError {
 
     #[error("A journal replacement cannot contain duplicate entry id {0}.")]
     DuplicateEntryId(EntryId),
+
+    #[error("Entry id {0} is outside the range this journal supports.")]
+    EntryIdOutOfRange(EntryId),
+
+    #[error("Entry {0} was changed by another instance. Reload it before saving again.")]
+    Conflict(EntryId),
 }
 
 /// Owns the SQLite connection. All SQL in the application lives in this module.
@@ -191,6 +199,14 @@ impl Storage {
             .collect())
     }
 
+    /// Read a consistent snapshot of every entry for backup export.
+    pub fn snapshot_entries(&self) -> Result<Vec<JournalEntry>, StorageError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let entries = self.list_entries()?;
+        tx.commit()?;
+        Ok(entries)
+    }
+
     /// Insert a validated entry and its tags in one transaction.
     pub fn create_entry(&mut self, input: &ValidatedEntry) -> Result<JournalEntry, StorageError> {
         let now = format_timestamp(chrono::Utc::now());
@@ -207,20 +223,59 @@ impl Storage {
         self.get_entry(id)?.ok_or(StorageError::NotFound(id))
     }
 
-    /// Update an entry, preserving its creation timestamp.
+    /// Update an entry only if its stored revision still matches the editor.
+    ///
+    /// `expected_updated_at` prevents a stale draft from overwriting a newer
+    /// save made by another app instance.
     pub fn update_entry(
         &mut self,
         id: EntryId,
+        expected_updated_at: DateTime<Utc>,
         input: &ValidatedEntry,
     ) -> Result<JournalEntry, StorageError> {
-        let now = format_timestamp(chrono::Utc::now());
         let tx = self.conn.transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT created_at, updated_at FROM entries WHERE id = ?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((created_at_raw, current_updated_raw)) = current else {
+            return Err(StorageError::NotFound(id));
+        };
+
+        let current_updated = match parse_timestamp(&current_updated_raw) {
+            Ok(timestamp) => timestamp,
+            Err(_) => {
+                return Err(StorageError::CorruptTimestamp {
+                    id,
+                    value: current_updated_raw,
+                });
+            }
+        };
+        if current_updated != expected_updated_at {
+            return Err(StorageError::Conflict(id));
+        }
+
+        let created_at = match parse_timestamp(&created_at_raw) {
+            Ok(timestamp) => timestamp,
+            Err(_) => {
+                return Err(StorageError::CorruptTimestamp {
+                    id,
+                    value: created_at_raw,
+                });
+            }
+        };
+        let now = format_timestamp(Utc::now().max(created_at).max(expected_updated_at));
+
         let changed = tx.execute(
-            "UPDATE entries SET title = ?1, body = ?2, updated_at = ?3 WHERE id = ?4",
-            params![input.title, input.body, now, id],
+            "UPDATE entries SET title = ?1, body = ?2, updated_at = ?3
+             WHERE id = ?4 AND updated_at = ?5",
+            params![input.title, input.body, now, id, current_updated_raw],
         )?;
         if changed == 0 {
-            return Err(StorageError::NotFound(id));
+            return Err(StorageError::Conflict(id));
         }
         tx.execute("DELETE FROM entry_tags WHERE entry_id = ?1", [id])?;
         set_tags(&tx, id, &input.tags)?;
@@ -265,6 +320,9 @@ impl Storage {
     pub fn replace_all_entries(&mut self, entries: &[JournalEntry]) -> Result<(), StorageError> {
         let mut ids = HashSet::with_capacity(entries.len());
         for entry in entries {
+            if entry.id <= 0 || entry.id > MAX_ENTRY_ID {
+                return Err(StorageError::EntryIdOutOfRange(entry.id));
+            }
             if !ids.insert(entry.id) {
                 return Err(StorageError::DuplicateEntryId(entry.id));
             }
@@ -466,6 +524,7 @@ mod tests {
         let updated = storage
             .update_entry(
                 created.id,
+                created.updated_at,
                 &validated("Renamed entry", "Updated body", "journal, work"),
             )
             .unwrap();
@@ -561,10 +620,55 @@ mod tests {
 
         thread::sleep(Duration::from_millis(5));
         storage
-            .update_entry(first.id, &validated("First updated", "Body text", ""))
+            .update_entry(
+                first.id,
+                first.updated_at,
+                &validated("First updated", "Body text", ""),
+            )
             .unwrap();
         let entries = storage.list_entries().unwrap();
         assert_eq!(entries[0].id, first.id);
+    }
+
+    #[test]
+    fn stale_updates_are_rejected() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let created = seed(&mut storage, "Original", "work");
+        thread::sleep(Duration::from_millis(5));
+
+        let updated = storage
+            .update_entry(
+                created.id,
+                created.updated_at,
+                &validated("Updated", "New body", "work"),
+            )
+            .unwrap();
+
+        let error = storage
+            .update_entry(
+                created.id,
+                created.updated_at,
+                &validated("Stale draft", "Old body", "work"),
+            )
+            .unwrap_err();
+        assert!(matches!(error, StorageError::Conflict(id) if id == created.id));
+        assert_eq!(
+            storage.get_entry(created.id).unwrap().unwrap(),
+            updated,
+            "a conflicting save must not modify the entry"
+        );
+    }
+
+    #[test]
+    fn snapshot_matches_the_stored_entries() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        seed(&mut storage, "One", "work");
+        seed(&mut storage, "Two", "personal");
+
+        assert_eq!(
+            storage.snapshot_entries().unwrap(),
+            storage.list_entries().unwrap()
+        );
     }
 
     #[test]
@@ -608,6 +712,14 @@ mod tests {
         ];
         let error = storage.replace_all_entries(&duplicate).unwrap_err();
         assert!(matches!(error, StorageError::DuplicateEntryId(42)));
+        assert_eq!(storage.list_entries().unwrap(), replacement);
+
+        let out_of_range = vec![JournalEntry {
+            id: MAX_ENTRY_ID + 1,
+            ..replacement[0].clone()
+        }];
+        let error = storage.replace_all_entries(&out_of_range).unwrap_err();
+        assert!(matches!(error, StorageError::EntryIdOutOfRange(_)));
         assert_eq!(storage.list_entries().unwrap(), replacement);
     }
 

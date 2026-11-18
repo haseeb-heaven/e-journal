@@ -12,6 +12,12 @@ use thiserror::Error;
 /// Stable identity for a stored journal entry.
 pub type EntryId = i64;
 
+/// Largest entry id accepted from a backup.
+///
+/// This leaves enough room in SQLite's signed 64-bit AUTOINCREMENT sequence for
+/// future entries after a restore.
+pub const MAX_ENTRY_ID: EntryId = 1_000_000_000_000;
+
 /// A validated, stored journal entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
@@ -81,9 +87,14 @@ impl EntryDraft {
     /// Compare a draft to its stored entry, using the same normalization that a
     /// save applies. This keeps the "unsaved changes" indicator honest.
     pub fn matches_entry(&self, entry: &JournalEntry) -> bool {
+        let mut draft_tags = normalize_tags(&self.tags_text);
+        let mut entry_tags = normalize_tags(&tags_to_text(&entry.tags));
+        draft_tags.sort_unstable();
+        entry_tags.sort_unstable();
+
         self.title.trim() == entry.title.trim()
             && self.body.trim_end() == entry.body.trim_end()
-            && normalize_tags(&self.tags_text) == normalize_tags(&tags_to_text(&entry.tags))
+            && draft_tags == entry_tags
     }
 }
 
@@ -98,7 +109,10 @@ pub fn normalize_tags(input: &str) -> Vec<String> {
     let mut tags = Vec::new();
 
     for raw in input.split(',') {
-        let tag = raw.trim().trim_start_matches('#').trim();
+        let tag = raw
+            .trim()
+            .trim_start_matches(|character: char| character == '#' || character.is_whitespace())
+            .trim_end();
         if tag.is_empty() {
             continue;
         }
@@ -218,6 +232,13 @@ mod tests {
     }
 
     #[test]
+    fn tag_normalization_is_idempotent() {
+        let once = normalize_tags("# #Work, ## deep   work, # personal");
+        assert_eq!(once, vec!["work", "deep work", "personal"]);
+        assert_eq!(normalize_tags(&once.join(", ")), once);
+    }
+
+    #[test]
     fn search_matches_title_and_body_terms() {
         let entry = entry(
             "Morning walk",
@@ -267,6 +288,17 @@ mod tests {
         assert!(draft.matches_entry(&entry));
         assert!(draft.has_content());
         assert!(!EntryDraft::default().has_content());
+    }
+
+    #[test]
+    fn draft_dirty_check_ignores_tag_order() {
+        let entry = entry("Title", "Body", &["personal", "work"]);
+        let draft = EntryDraft {
+            title: "Title".into(),
+            body: "Body".into(),
+            tags_text: "#work, #personal".into(),
+        };
+        assert!(draft.matches_entry(&entry));
     }
 
     #[test]

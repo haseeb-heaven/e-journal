@@ -1,6 +1,6 @@
 //! egui application shell: journal list, editor, themes, and user feedback.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Local, Utc};
@@ -346,6 +346,7 @@ pub struct EJournalApp {
     visible_ids: Vec<EntryId>,
     tags: Vec<String>,
     selected_id: Option<EntryId>,
+    base_updated_at: Option<DateTime<Utc>>,
     is_new: bool,
     draft: EntryDraft,
     search: String,
@@ -405,6 +406,7 @@ impl EJournalApp {
             visible_ids: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
+            base_updated_at: None,
             is_new: false,
             draft: EntryDraft::default(),
             search: String::new(),
@@ -456,13 +458,22 @@ impl EJournalApp {
         if let Some(id) = self.selected_id {
             if !self.entries.iter().any(|entry| entry.id == id) {
                 self.selected_id = None;
-                self.is_new = false;
-                self.draft = EntryDraft::default();
+                self.base_updated_at = None;
+                if self.draft.has_content() {
+                    self.is_new = true;
+                    self.notice = Some(Notice::info(
+                        "That entry was removed outside E-Journal. Your draft is still open; \
+                         save it to keep it as a new entry.",
+                    ));
+                } else {
+                    self.is_new = false;
+                    self.draft = EntryDraft::default();
+                }
             }
         }
 
         let filter = self.current_filter();
-        self.refresh_visible(&filter)?;
+        self.refresh_visible(&filter);
 
         Ok(())
     }
@@ -474,17 +485,13 @@ impl EJournalApp {
         }
     }
 
-    fn refresh_visible(&mut self, filter: &SearchFilter) -> Result<(), StorageError> {
-        self.visible_ids = if filter.is_active() {
-            self.storage
-                .search(filter)?
-                .into_iter()
-                .map(|entry| entry.id)
-                .collect()
-        } else {
-            self.entries.iter().map(|entry| entry.id).collect()
-        };
-        Ok(())
+    fn refresh_visible(&mut self, filter: &SearchFilter) {
+        self.visible_ids = self
+            .entries
+            .iter()
+            .filter(|entry| filter.matches(entry))
+            .map(|entry| entry.id)
+            .collect();
     }
 
     fn reload_data(&mut self) {
@@ -498,6 +505,7 @@ impl EJournalApp {
     fn open_entry(&mut self, id: EntryId) {
         if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
             self.selected_id = Some(id);
+            self.base_updated_at = Some(entry.updated_at);
             self.is_new = false;
             self.draft = EntryDraft::from_entry(entry);
         }
@@ -540,6 +548,7 @@ impl EJournalApp {
         match target {
             EditorTarget::New => {
                 self.selected_id = None;
+                self.base_updated_at = None;
                 self.is_new = true;
                 self.draft = EntryDraft::default();
                 self.focus_title = true;
@@ -565,13 +574,36 @@ impl EJournalApp {
         };
 
         let was_new = self.selected_id.is_none();
-        let saved = match self.selected_id {
-            Some(id) => self.storage.update_entry(id, &validated),
+        let save_result = match self.selected_id {
+            Some(id) => {
+                let Some(expected_updated_at) = self.base_updated_at else {
+                    return Err(
+                        "This entry is no longer available. Reopen it before saving.".to_owned(),
+                    );
+                };
+                self.storage
+                    .update_entry(id, expected_updated_at, &validated)
+            }
             None => self.storage.create_entry(&validated),
-        }
-        .map_err(|error| format!("Could not save this entry: {error}"))?;
+        };
+
+        let saved = match save_result {
+            Ok(saved) => saved,
+            Err(StorageError::Conflict(_)) => {
+                let refresh_message = match self.refresh_data() {
+                    Ok(()) => String::new(),
+                    Err(error) => format!(" The journal list also failed to refresh: {error}"),
+                };
+                return Err(format!(
+                    "This entry changed in another window. Your draft is still open; choose \
+                     Revert to load the latest version before saving again.{refresh_message}"
+                ));
+            }
+            Err(error) => return Err(format!("Could not save this entry: {error}")),
+        };
 
         self.selected_id = Some(saved.id);
+        self.base_updated_at = Some(saved.updated_at);
         self.is_new = false;
         self.draft = EntryDraft::from_entry(&saved);
 
@@ -598,11 +630,20 @@ impl EJournalApp {
             Ok(true) => {
                 if self.selected_id == Some(id) {
                     self.selected_id = None;
+                    self.base_updated_at = None;
                     self.is_new = false;
                     self.draft = EntryDraft::default();
                 }
-                self.reload_data();
-                self.notice = Some(Notice::success("Entry deleted."));
+                match self.refresh_data() {
+                    Ok(()) => {
+                        self.notice = Some(Notice::success("Entry deleted."));
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "Entry deleted, but the journal list could not be refreshed: {error}"
+                        )));
+                    }
+                }
             }
             Ok(false) => {
                 self.notice = Some(Notice::error("That entry was already deleted."));
@@ -621,6 +662,7 @@ impl EJournalApp {
         match backup::apply_import(&mut self.storage, &entries) {
             Ok(()) => {
                 self.selected_id = None;
+                self.base_updated_at = None;
                 self.is_new = false;
                 self.draft = EntryDraft::default();
                 match self.refresh_data() {
@@ -645,7 +687,16 @@ impl EJournalApp {
     }
 
     fn export_backup(&mut self) {
-        if self.entries.is_empty() {
+        let entries = match self.storage.snapshot_entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not read the journal for export: {error}"
+                )));
+                return;
+            }
+        };
+        if entries.is_empty() {
             self.notice = Some(Notice::info("There are no entries to export yet."));
             return;
         }
@@ -660,7 +711,7 @@ impl EJournalApp {
             return;
         };
 
-        match backup::write_backup(&path, &self.entries) {
+        match backup::write_backup(&path, &entries) {
             Ok(()) => {
                 self.notice = Some(Notice::success(format!(
                     "Backup exported to {}.",
@@ -706,7 +757,7 @@ impl EJournalApp {
             return;
         }
         self.theme = theme;
-        ctx.set_theme(theme.theme_preference());
+        apply_theme(ctx, theme);
 
         if let Err(error) = self
             .storage
@@ -774,9 +825,11 @@ impl EJournalApp {
                 if let Some(id) = self.selected_id {
                     if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
                         self.draft = EntryDraft::from_entry(entry);
+                        self.base_updated_at = Some(entry.updated_at);
                     }
                 } else if self.is_new {
                     self.draft = EntryDraft::default();
+                    self.base_updated_at = None;
                 }
                 self.notice = Some(Notice::info("Reverted unsaved changes."));
             }
@@ -794,18 +847,18 @@ impl EJournalApp {
             Action::Import => self.choose_import(),
             Action::DismissNotice => self.notice = None,
             Action::ConfirmDelete(id) => self.delete_entry(id),
-            Action::SaveBeforeSwitch(target) => {
-                if self.save_current().is_ok() {
-                    self.perform_switch(target);
-                }
-            }
+            Action::SaveBeforeSwitch(target) => match self.save_current() {
+                Ok(()) => self.perform_switch(target),
+                Err(message) => self.notice = Some(Notice::error(message)),
+            },
             Action::DiscardAndSwitch(target) => self.perform_switch(target),
-            Action::SaveBeforeClose => {
-                if self.save_current().is_ok() {
+            Action::SaveBeforeClose => match self.save_current() {
+                Ok(()) => {
                     self.allow_close = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
-            }
+                Err(message) => self.notice = Some(Notice::error(message)),
+            },
             Action::DiscardAndClose => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -940,11 +993,7 @@ impl EJournalApp {
 
         let filter = self.current_filter();
         if filter != previous_filter {
-            if let Err(error) = self.refresh_visible(&filter) {
-                self.notice = Some(Notice::error(format!(
-                    "Could not search the journal: {error}"
-                )));
-            }
+            self.refresh_visible(&filter);
         }
 
         ui.add_space(2.0);
@@ -972,10 +1021,12 @@ impl EJournalApp {
                     });
                 }
 
-                for id in &self.visible_ids {
-                    let Some(entry) = self.entries.iter().find(|entry| entry.id == *id) else {
-                        continue;
-                    };
+                let visible_ids: HashSet<EntryId> = self.visible_ids.iter().copied().collect();
+                for entry in self
+                    .entries
+                    .iter()
+                    .filter(|entry| visible_ids.contains(&entry.id))
+                {
                     let selected = !self.is_new && self.selected_id == Some(entry.id);
                     if entry_row(ui, entry, selected, &palette).clicked() {
                         actions.push(Action::Select(entry.id));
@@ -1586,6 +1637,7 @@ impl EJournalApp {
                 }
                 Modal::Import { entries, file_name } => {
                     let current_count = self.entries.len();
+                    let draft_dirty = self.is_dirty();
                     ui.heading("Replace your journal?");
                     ui.add_space(4.0);
                     ui.add(
@@ -1608,16 +1660,33 @@ impl EJournalApp {
                         )
                         .wrap(),
                     );
+                    if draft_dirty {
+                        ui.add_space(8.0);
+                        ui.add(
+                            Label::new(
+                                RichText::new(
+                                    "You have unsaved changes in the editor. They will be \
+                                     discarded if you replace the journal.",
+                                )
+                                .small()
+                                .color(palette.danger),
+                            )
+                            .wrap(),
+                        );
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if draft_dirty {
+                                "Discard draft and replace"
+                            } else {
+                                "Replace journal"
+                            };
                             if ui
                                 .add(
-                                    Button::new(
-                                        RichText::new("Replace journal").color(palette.on_danger),
-                                    )
-                                    .fill(palette.danger)
-                                    .corner_radius(8),
+                                    Button::new(RichText::new(label).color(palette.on_danger))
+                                        .fill(palette.danger)
+                                        .corner_radius(8),
                                 )
                                 .clicked()
                             {
@@ -1845,6 +1914,75 @@ mod tests {
     }
 
     #[test]
+    fn stale_editor_revision_is_not_saved() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let base = app.base_updated_at.unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let external = EntryDraft {
+            title: "External edit".into(),
+            body: "Changed in another window.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.update_entry(id, base, &external).unwrap();
+
+        app.draft.title = "Stale edit".into();
+        let error = app.save_current().unwrap_err();
+
+        assert!(error.contains("changed in another window"));
+        assert_eq!(
+            app.storage.get_entry(id).unwrap().unwrap().title,
+            "External edit"
+        );
+        assert_eq!(app.draft.title, "Stale edit");
+        assert_eq!(app.base_updated_at, Some(base));
+        assert_eq!(app.entries[0].title, "External edit");
+    }
+
+    #[test]
+    fn externally_deleted_entry_keeps_the_draft() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        app.draft.body.push_str(" Still editing.");
+
+        app.storage.delete_entry(id).unwrap();
+        app.refresh_data().unwrap();
+
+        assert_eq!(app.selected_id, None);
+        assert!(app.is_new);
+        assert_eq!(
+            app.draft.body,
+            "Some body text for the renderer. Still editing."
+        );
+        assert!(matches!(
+            app.notice.as_ref().map(|notice| &notice.kind),
+            Some(NoticeKind::Info)
+        ));
+    }
+
+    #[test]
+    fn changing_theme_applies_widget_visuals_immediately() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        apply_theme(&ctx, Theme::Warm);
+
+        app.set_theme(&ctx, Theme::Slate);
+
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark).visuals.panel_fill,
+            Theme::Slate.visuals().panel_fill
+        );
+    }
+
+    #[test]
     fn entries_are_elided_without_breaking_unicode() {
         assert_eq!(elide("short", 10), "short");
         assert_eq!(elide("a longer title", 4), "a lo…");
@@ -1869,6 +2007,7 @@ mod tests {
             visible_ids: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
+            base_updated_at: None,
             is_new: false,
             draft: EntryDraft::default(),
             search: String::new(),

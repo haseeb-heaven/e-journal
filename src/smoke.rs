@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::backup::{self, BackupError};
-use crate::model::{EntryDraft, ValidationError};
+use crate::model::{EntryDraft, SearchFilter, ValidationError};
 use crate::storage::{Storage, StorageError};
 
 #[derive(Debug, Error)]
@@ -41,11 +41,8 @@ pub fn run() -> Result<usize, SmokeError> {
         .filter(|path| !path.as_os_str().is_empty())
         .ok_or(SmokeError::MissingDirectory)?;
 
-    let work_dir = parent.join("e-journal-smoke");
-    if work_dir.exists() {
-        std::fs::remove_dir_all(&work_dir)?;
-    }
-    std::fs::create_dir_all(&work_dir)?;
+    std::fs::create_dir_all(&parent)?;
+    let work_dir = create_work_dir(&parent)?;
 
     let db_path = work_dir.join("smoke.sqlite3");
     let backup_path = work_dir.join("backup.json");
@@ -65,6 +62,7 @@ pub fn run() -> Result<usize, SmokeError> {
 
     let updated = storage.update_entry(
         created.id,
+        created.updated_at,
         &draft(
             "Smoke entry updated",
             "Updated body for the end-to-end smoke test.",
@@ -81,6 +79,16 @@ pub fn run() -> Result<usize, SmokeError> {
     if entries.len() != 1 || entries[0].title != "Smoke entry updated" {
         return Err(SmokeError::Check(
             "updated entry was not returned by list_entries".to_owned(),
+        ));
+    }
+
+    let matches = storage.search(&SearchFilter {
+        query: "updated".to_owned(),
+        tag: Some("verified".to_owned()),
+    })?;
+    if matches.len() != 1 || matches[0].id != updated.id {
+        return Err(SmokeError::Check(
+            "search did not return the updated entry".to_owned(),
         ));
     }
 
@@ -124,6 +132,25 @@ pub fn run() -> Result<usize, SmokeError> {
     }
 
     Ok(restored.len())
+}
+
+fn create_work_dir(parent: &std::path::Path) -> Result<PathBuf, SmokeError> {
+    for attempt in 0..100 {
+        let name = if attempt == 0 {
+            format!("e-journal-smoke-{}", std::process::id())
+        } else {
+            format!("e-journal-smoke-{}-{attempt}", std::process::id())
+        };
+        let candidate = parent.join(name);
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(SmokeError::Check(
+        "could not create a unique smoke-test directory".to_owned(),
+    ))
 }
 
 fn draft(title: &str, body: &str, tags: &str) -> Result<crate::model::ValidatedEntry, SmokeError> {

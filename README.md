@@ -192,7 +192,7 @@ cargo build
 cargo build --release
 ```
 
-The suite currently includes **32 unit tests** and **5 process-level E2E
+The suite currently includes **42 unit tests** and **6 process-level E2E
 tests** (`assert_cmd`) covering:
 
 - entry validation, tag normalization, search, filters, and CLI parsing;

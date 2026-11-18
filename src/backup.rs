@@ -5,13 +5,14 @@
 //! itself runs in one SQLite transaction.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{normalize_tags, EntryDraft, JournalEntry};
+use crate::model::{normalize_tags, EntryDraft, JournalEntry, MAX_ENTRY_ID};
 use crate::storage::{Storage, StorageError};
 
 pub const BACKUP_FORMAT: &str = "e-journal-backup";
@@ -90,17 +91,12 @@ impl From<&JournalEntry> for BackupEntry {
 
 impl BackupEntry {
     fn validate(self, index: usize) -> Result<JournalEntry, BackupError> {
-        if self.id <= 0 {
+        if self.id <= 0 || self.id > MAX_ENTRY_ID {
             return Err(BackupError::InvalidEntry {
                 index,
-                message: "entry id must be a positive number".into(),
-            });
-        }
-
-        if self.updated_at < self.created_at {
-            return Err(BackupError::InvalidEntry {
-                index,
-                message: "updated_at is earlier than created_at".into(),
+                message: format!(
+                    "entry id must be between 1 and {MAX_ENTRY_ID} so future entries can be created"
+                ),
             });
         }
 
@@ -174,13 +170,52 @@ pub fn read_backup(path: &Path) -> Result<Vec<JournalEntry>, BackupError> {
     parse(&json)
 }
 
-/// Write a backup file.
+/// Write a backup file through a private temporary file.
+///
+/// The destination is replaced only after the complete JSON payload has been
+/// written and synced, so a failed export cannot truncate an existing backup.
 pub fn write_backup(path: &Path, entries: &[JournalEntry]) -> Result<(), BackupError> {
     let json = export_to_string(entries)?;
-    std::fs::write(path, json).map_err(|source| BackupError::WriteFile {
-        path: path.display().to_string(),
-        source,
-    })
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".e-journal-backup-")
+        .tempfile_in(parent)
+        .map_err(|source| BackupError::WriteFile {
+            path: path.display().to_string(),
+            source,
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|source| BackupError::WriteFile {
+                path: path.display().to_string(),
+                source,
+            })?;
+    }
+
+    temporary
+        .write_all(json.as_bytes())
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|source| BackupError::WriteFile {
+            path: path.display().to_string(),
+            source,
+        })?;
+
+    temporary
+        .persist(path)
+        .map_err(|error| BackupError::WriteFile {
+            path: path.display().to_string(),
+            source: error.error,
+        })?;
+    Ok(())
 }
 
 /// Replace the journal contents with an already-validated backup.
@@ -270,12 +305,19 @@ mod tests {
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
 
-        let mut invalid_time = entry(4, "Time", &[]);
-        invalid_time.updated_at = invalid_time.created_at - chrono::Duration::seconds(1);
+        let huge = entry(MAX_ENTRY_ID + 1, "Too large", &[]);
         assert!(matches!(
-            parse(&export_to_string(&[invalid_time]).unwrap()),
+            parse(&export_to_string(&[huge]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
+    }
+
+    #[test]
+    fn historical_timestamps_are_accepted() {
+        let mut backdated = entry(4, "Time", &[]);
+        backdated.updated_at = backdated.created_at - chrono::Duration::days(1);
+        let parsed = parse(&export_to_string(&[backdated.clone()]).unwrap()).unwrap();
+        assert_eq!(parsed, vec![backdated]);
     }
 
     #[test]
@@ -301,6 +343,41 @@ mod tests {
 
         let error = read_backup(&dir.path().join("missing.json")).unwrap_err();
         assert!(matches!(error, BackupError::ReadFile { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("backup.json");
+        write_backup(&path, &[entry(12, "Private", &["backup"])]).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_export_preserves_existing_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("backup.json");
+        write_backup(&path, &[entry(13, "Original", &[])]).unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        let original_permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_mode(0o500);
+        std::fs::set_permissions(dir.path(), read_only).unwrap();
+
+        let result = write_backup(&path, &[entry(14, "Replacement", &[])]);
+
+        std::fs::set_permissions(dir.path(), original_permissions).unwrap();
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]

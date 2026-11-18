@@ -33,5 +33,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Application and package renamed from Journal to E-Journal.
 - Versioned the first release as `1.0.0`.
 
+### Fixed
+
+- Backups are written through a private temporary file and atomically replace
+  the destination, so a failed export cannot truncate an existing backup.
+- Backup files use owner-only permissions on Unix.
+- Saves now detect when another app instance changed the entry and keep the
+  draft open instead of silently overwriting the newer version.
+- A draft stays open as a new entry when its entry was deleted by another app
+  instance.
+- Imports reject entry IDs that would exhaust SQLite's ID sequence and accept
+  valid backups whose timestamps predate a system clock change.
+- The import confirmation warns before discarding an unsaved draft.
+- Save failures in switch and close confirmations are shown in the UI.
+- Exports read a consistent snapshot from the database instead of the sidebar
+  cache.
+- Tag normalization is idempotent, and reordered tags no longer trigger a false
+  unsaved-change prompt.
+- Theme changes apply widget visuals immediately.
+- Search filters the cached entries, and sidebar rendering no longer scans the
+  full entry list for every row.
+- Delete and refresh failures are reported alongside the delete result.
+- Smoke tests create unique working directories and never delete files supplied
+  by the caller.
+
 [Unreleased]: https://github.com/haseeb-heaven/e-journal/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/haseeb-heaven/e-journal/releases/tag/v1.0.0
