@@ -330,6 +330,7 @@ enum Action {
     SetTextSize(TextSize),
     SetOpenRecent(bool),
     Save,
+    SaveAsNew,
     Revert,
     RequestDelete,
     Export,
@@ -528,6 +529,35 @@ impl EJournalApp {
         }
     }
 
+    fn save_as_new(&mut self) -> Result<(), String> {
+        let validated = match self.draft.validate() {
+            Ok(validated) => validated,
+            Err(error) => {
+                self.focus_title = true;
+                return Err(error.to_string());
+            }
+        };
+
+        let saved = match self.storage.create_entry(&validated) {
+            Ok(saved) => saved,
+            Err(error) => {
+                return Err(format!("Could not save this draft as a new entry: {error}"));
+            }
+        };
+
+        self.selected_id = Some(saved.id);
+        self.base_entry = Some(saved.clone());
+        self.is_new = false;
+        self.draft = EntryDraft::from_entry(&saved);
+        if let Err(error) = self.refresh_data() {
+            return Err(format!(
+                "Saved as a new entry, but the journal list could not refresh: {error}"
+            ));
+        }
+        self.notice = Some(Notice::success("Saved as a new entry."));
+        Ok(())
+    }
+
     fn open_entry(&mut self, id: EntryId, expected_revision: i64) {
         match self.storage.get_entry(id) {
             Ok(Some(entry)) if entry.revision != expected_revision => {
@@ -681,7 +711,8 @@ impl EJournalApp {
                 };
                 return Err(format!(
                     "This entry changed in another window. Your draft is still open; choose \
-                     Revert to load the latest version before saving again.{refresh_message}"
+                     Revert to load the latest version, or Save as new to keep your draft as a \
+                     separate entry.{refresh_message}"
                 ));
             }
             Err(StorageError::NotFound(_)) => {
@@ -1019,6 +1050,11 @@ impl EJournalApp {
                     if let Err(message) = self.save_current() {
                         self.notice = Some(Notice::error(message));
                     }
+                }
+            }
+            Action::SaveAsNew => {
+                if let Err(message) = self.save_as_new() {
+                    self.notice = Some(Notice::error(message));
                 }
             }
             Action::Revert => {
@@ -1756,6 +1792,22 @@ impl EJournalApp {
                 if save.clicked() {
                     actions.push(Action::Save);
                 }
+                if dirty
+                    && self.has_stale_revision()
+                    && ui
+                        .add(
+                            Button::new(
+                                RichText::new("Save as new")
+                                    .small()
+                                    .color(palette.weak_text),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Keep your draft as a separate entry")
+                        .clicked()
+                {
+                    actions.push(Action::SaveAsNew);
+                }
                 if can_revert
                     && ui
                         .add(
@@ -2447,6 +2499,42 @@ mod tests {
         }
         assert_eq!(TextSize::from_setting(None), TextSize::Default);
         assert_eq!(TextSize::from_setting(Some("unknown")), TextSize::Default);
+    }
+
+    #[test]
+    fn conflicted_draft_can_be_saved_as_new() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry_cached(id);
+        let base_revision = app.base_entry.as_ref().unwrap().revision;
+        app.draft.body.push_str(" Conflicted draft.");
+
+        let external = EntryDraft {
+            title: "Saved elsewhere".into(),
+            body: "Other body.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage
+            .update_entry(id, base_revision, &external)
+            .unwrap();
+
+        assert!(app.save_current().is_err());
+        assert!(app.has_stale_revision());
+        app.apply_action(&ctx, Action::SaveAsNew);
+
+        assert_eq!(app.entries.len(), 2);
+        assert_eq!(
+            app.draft.body,
+            "Some body text for the renderer. Conflicted draft."
+        );
+        assert!(matches!(
+            &app.notice,
+            Some(notice) if matches!(notice.kind, NoticeKind::Success)
+        ));
     }
 
     #[test]

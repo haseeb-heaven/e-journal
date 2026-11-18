@@ -215,11 +215,29 @@ enum StartupError {
 fn database_path() -> Result<PathBuf, StartupError> {
     let project_dirs = ProjectDirs::from("com", "HaseebHeaven", "E-Journal")
         .ok_or(StartupError::NoDataDirectory)?;
-    Ok(project_dirs.data_dir().join("e-journal.sqlite3"))
+    let current = project_dirs.data_dir().join("e-journal.sqlite3");
+    Ok(preferred_database_path(current, previous_database_path()))
+}
+
+fn previous_database_path() -> Option<PathBuf> {
+    ProjectDirs::from("com", "JournalApp", "Journal")
+        .map(|project_dirs| project_dirs.data_dir().join("journal.sqlite3"))
+}
+
+/// Prefer the E-Journal database, but keep using an existing Journal database
+/// when the new location has not been created yet. If both exist, the new
+/// database wins rather than overwriting either one.
+fn preferred_database_path(current: PathBuf, previous: Option<PathBuf>) -> PathBuf {
+    match previous {
+        Some(previous) if !current.exists() && previous.is_file() => previous,
+        _ => current,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -240,7 +258,34 @@ mod tests {
     #[test]
     fn database_path_is_outside_the_project_folder() {
         let path = super::database_path().expect("a data directory should be available");
-        assert!(path.ends_with("e-journal.sqlite3"));
+        assert!(
+            path.file_name() == Some(std::ffi::OsStr::new("e-journal.sqlite3"))
+                || path.file_name() == Some(std::ffi::OsStr::new("journal.sqlite3"))
+        );
         assert!(!path.starts_with(env!("CARGO_MANIFEST_DIR")));
+    }
+
+    #[test]
+    fn a_previous_database_is_used_until_the_new_one_exists() {
+        let directory = tempdir().unwrap();
+        let current = directory.path().join("e-journal.sqlite3");
+        let previous = directory.path().join("journal.sqlite3");
+
+        assert_eq!(
+            preferred_database_path(current.clone(), Some(previous.clone())),
+            current
+        );
+
+        std::fs::write(&previous, "old journal").unwrap();
+        assert_eq!(
+            preferred_database_path(current.clone(), Some(previous.clone())),
+            previous
+        );
+
+        std::fs::write(&current, "new journal").unwrap();
+        assert_eq!(
+            preferred_database_path(current, Some(previous)),
+            directory.path().join("e-journal.sqlite3")
+        );
     }
 }

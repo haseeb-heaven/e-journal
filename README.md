@@ -103,7 +103,11 @@ application data directory:
 | Windows | `%APPDATA%\HaseebHeaven\E-Journal\data\e-journal.sqlite3` |
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/e-journal/e-journal.sqlite3` |
 
-The exact path is shown in **Settings → Your data**.
+The exact path is shown in **Settings → Your data**. If you used the earlier
+Journal build, E-Journal opens that existing database in place when no
+E-Journal database exists yet, so upgrading keeps your entries. If both
+databases exist, the E-Journal database is used and the old files are left
+untouched.
 
 ## Backups
 
@@ -194,7 +198,7 @@ cargo build
 cargo build --release
 ```
 
-The suite currently includes **75 unit tests** and **7 process-level E2E
+The suite currently includes **77 unit tests** and **7 process-level E2E
 tests** (`assert_cmd`) covering:
 
 - entry validation, tag normalization, search, filters, and CLI parsing;

@@ -30,7 +30,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Application and package renamed from Journal to E-Journal.
+- Application and package renamed from Journal to E-Journal. On first launch,
+  an existing Journal database is opened in place when the E-Journal database
+  does not exist yet; when both exist, the E-Journal database wins.
 - Versioned the first release as `1.0.0`.
 
 ### Fixed
@@ -75,7 +77,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   journal before another confirmation can be opened.
 - The import confirmation warns before discarding an unsaved draft and moves the
   validated entries into the restore action instead of cloning every body.
-- Save failures in switch and close confirmations are shown in the UI.
+- Save failures in switch and close confirmations are shown in the UI. A draft
+  that conflicts after an external save or import can be kept with **Save as
+  new** instead of being discarded by Revert.
 - Exports and editor loads read entries and tags from consistent database
   snapshots instead of mixing revisions.
 - Save results are read inside the write transaction, before it commits.
