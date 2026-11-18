@@ -104,6 +104,21 @@ fn smoke_test_requires_an_explicit_disposable_directory() {
         .stderr(predicate::str::contains("E_JOURNAL_SMOKE_DIR"));
 }
 
+#[cfg(unix)]
+#[test]
+fn non_unicode_arguments_are_rejected_without_panicking() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    Command::cargo_bin("e-journal")
+        .expect("the e-journal binary")
+        .arg(OsStr::from_bytes(b"\xff"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown argument"))
+        .stderr(predicate::str::contains("panicked").not());
+}
+
 #[test]
 fn unknown_options_are_rejected() {
     Command::cargo_bin("e-journal")

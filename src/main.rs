@@ -26,8 +26,16 @@ fn main() -> ExitCode {
     #[cfg(all(windows, not(debug_assertions)))]
     attach_parent_console();
 
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let mode = match parse_mode(&args) {
+    let mode = std::env::args_os()
+        .skip(1)
+        .map(|argument| {
+            argument
+                .into_string()
+                .map_err(|argument| format!("Unknown argument: {}", argument.to_string_lossy()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|args| parse_mode(&args));
+    let mode = match mode {
         Ok(mode) => mode,
         Err(message) => {
             eprintln!("{message}\n");

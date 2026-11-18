@@ -43,8 +43,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   editor cannot overwrite a newer save or a restored entry when the clock moves
   backwards.
 - Delete confirmations check the revision the user saw, so a replaced entry is
-  not removed without a second confirmation, and warn when the deletion will
-  also discard an unsaved draft.
+  not removed without a second confirmation, and a stale editor must reload the
+  entry before it can be deleted. The dialog warns when deletion or reloading
+  will discard an unsaved draft.
 - A draft stays open as a new entry when its entry was deleted by another app
   instance.
 - Imports remap unsafe high entry IDs to leave SQLite sequence headroom, reset
@@ -52,7 +53,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that cannot round-trip through storage, and accept valid backups whose
   timestamps predate a system clock change.
 - Import confirmation records the current entry revisions and refuses to restore
-  if another window changed the journal before confirmation.
+  if another window changed the journal before confirmation. A conflict refreshes
+  the visible journal before another confirmation can be opened.
 - The import confirmation warns before discarding an unsaved draft.
 - Save failures in switch and close confirmations are shown in the UI.
 - Exports and editor loads read entries and tags from consistent database
@@ -61,19 +63,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately.
-- Search filters the cached entries, and the sidebar virtualizes fixed-height
-  rows instead of drawing the whole journal every frame.
+- Search filters cached entries, caches the matching row indices, and the
+  sidebar virtualizes fixed-height rows instead of scanning and drawing the
+  whole journal every frame.
 - Delete and refresh failures are reported alongside the delete result.
 - Editing an entry removes tag names that are no longer used by any entry, and
-  search case-folds Greek sigma variants.
+  search uses full Unicode case folding.
 - The schema migration assigns revisions in one ordered pass.
 - Reverting now requires confirmation before discarding a dirty draft, reloads
   the latest saved entry from SQLite, and remains available when only the stored
   revision changed.
 - External saves no longer make an untouched editor look dirty.
+- Editor widgets get a fresh undo history whenever a different draft is loaded.
 - First-launch schema creation takes an immediate write transaction, so
   concurrent launches cannot race.
 - The journal directory and database use owner-only permissions on Unix.
+- The save shortcut only writes when the editor is dirty.
+- Non-Unicode command-line arguments produce a usage error instead of a panic.
 - Release builds on Windows attach CLI modes to the parent console while
   preserving redirected output.
 - Smoke tests create unique working directories and never delete files supplied

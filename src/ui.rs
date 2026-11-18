@@ -1,6 +1,6 @@
 //! egui application shell: journal list, editor, themes, and user feedback.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Local, Utc};
@@ -313,6 +313,7 @@ enum Modal {
     },
     UnsavedClose,
     ConfirmRevert,
+    ReloadBeforeDelete,
     Import {
         entries: Vec<JournalEntry>,
         file_name: String,
@@ -347,12 +348,13 @@ pub struct EJournalApp {
     storage: Storage,
     db_path: PathBuf,
     entries: Vec<JournalEntry>,
-    visible_ids: Vec<EntryId>,
+    visible_indices: Vec<usize>,
     tags: Vec<String>,
     selected_id: Option<EntryId>,
     base_entry: Option<JournalEntry>,
     is_new: bool,
     draft: EntryDraft,
+    editor_generation: u64,
     search: String,
     tag_filter: Option<String>,
     tab: MainTab,
@@ -407,12 +409,13 @@ impl EJournalApp {
             storage,
             db_path,
             entries: Vec::new(),
-            visible_ids: Vec::new(),
+            visible_indices: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
             base_entry: None,
             is_new: false,
             draft: EntryDraft::default(),
+            editor_generation: 0,
             search: String::new(),
             tag_filter: None,
             tab: MainTab::Entry,
@@ -446,8 +449,10 @@ impl EJournalApp {
     }
 
     fn refresh_data(&mut self) -> Result<(), StorageError> {
-        self.entries = self.storage.list_entries()?;
-        self.tags = self.storage.all_tags()?;
+        let entries = self.storage.list_entries()?;
+        let tags = self.storage.all_tags()?;
+        self.entries = entries;
+        self.tags = tags;
 
         if let Some(tag) = &self.tag_filter {
             if !self
@@ -473,6 +478,7 @@ impl EJournalApp {
                 } else {
                     self.is_new = false;
                     self.draft = EntryDraft::default();
+                    self.editor_generation = self.editor_generation.wrapping_add(1);
                 }
             }
         }
@@ -491,11 +497,12 @@ impl EJournalApp {
     }
 
     fn refresh_visible(&mut self, filter: &SearchFilter) {
-        self.visible_ids = self
+        self.visible_indices = self
             .entries
             .iter()
-            .filter(|entry| filter.matches(entry))
-            .map(|entry| entry.id)
+            .enumerate()
+            .filter(|(_, entry)| filter.matches(entry))
+            .map(|(index, _)| index)
             .collect();
     }
 
@@ -513,6 +520,7 @@ impl EJournalApp {
             self.base_entry = Some(entry.clone());
             self.is_new = false;
             self.draft = EntryDraft::from_entry(entry);
+            self.editor_generation = self.editor_generation.wrapping_add(1);
         }
     }
 
@@ -562,6 +570,7 @@ impl EJournalApp {
                 self.base_entry = None;
                 self.is_new = true;
                 self.draft = EntryDraft::default();
+                self.editor_generation = self.editor_generation.wrapping_add(1);
                 self.focus_title = true;
             }
             EditorTarget::Entry(id) => {
@@ -660,6 +669,7 @@ impl EJournalApp {
                     self.base_entry = None;
                     self.is_new = false;
                     self.draft = EntryDraft::default();
+                    self.editor_generation = self.editor_generation.wrapping_add(1);
                 }
                 match self.refresh_data() {
                     Ok(()) => {
@@ -710,6 +720,7 @@ impl EJournalApp {
                 self.base_entry = None;
                 self.is_new = false;
                 self.draft = EntryDraft::default();
+                self.editor_generation = self.editor_generation.wrapping_add(1);
                 match self.refresh_data() {
                     Ok(()) => {
                         self.notice = Some(Notice::success(format!(
@@ -724,10 +735,17 @@ impl EJournalApp {
                 }
             }
             Err(backup::BackupError::Storage(StorageError::JournalChanged)) => {
-                self.notice = Some(Notice::error(
-                    "The journal changed after you opened this import. Review the current \
-                     entries and import again. Nothing was changed.",
-                ));
+                let refresh = self.refresh_data();
+                let message = match refresh {
+                    Ok(()) => "The journal changed after you opened this import. Review the \
+                              current entries and import again. Nothing was changed."
+                        .to_owned(),
+                    Err(error) => format!(
+                        "The journal changed after you opened this import. Nothing was \
+                         changed. The journal list could not refresh: {error}"
+                    ),
+                };
+                self.notice = Some(Notice::error(message));
             }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
@@ -796,6 +814,13 @@ impl EJournalApp {
 
         match backup::read_backup(&path) {
             Ok(entries) => {
+                if let Err(error) = self.refresh_data() {
+                    self.notice = Some(Notice::error(format!(
+                        "Could not refresh the journal before opening the import. \
+                         Your journal was not changed. {error}"
+                    )));
+                    return;
+                }
                 let expected_revisions = match self.storage.revision_snapshot() {
                     Ok(revisions) => revisions,
                     Err(error) => {
@@ -907,6 +932,7 @@ impl EJournalApp {
                     match self.storage.get_entry(id) {
                         Ok(Some(entry)) => {
                             self.draft = EntryDraft::from_entry(&entry);
+                            self.editor_generation = self.editor_generation.wrapping_add(1);
                             self.base_entry = Some(entry);
                             if let Err(error) = self.refresh_data() {
                                 self.notice = Some(Notice::info(format!(
@@ -930,6 +956,7 @@ impl EJournalApp {
                             } else {
                                 self.is_new = false;
                                 self.draft = EntryDraft::default();
+                                self.editor_generation = self.editor_generation.wrapping_add(1);
                                 self.notice = Some(Notice::error("That entry no longer exists."));
                             }
                             if let Err(error) = self.refresh_data() {
@@ -947,11 +974,16 @@ impl EJournalApp {
                     }
                 } else if self.is_new {
                     self.draft = EntryDraft::default();
+                    self.editor_generation = self.editor_generation.wrapping_add(1);
                     self.base_entry = None;
                     self.notice = Some(Notice::info("Discarded the new entry draft."));
                 }
             }
             Action::RequestDelete => {
+                if self.has_stale_revision() {
+                    self.modal = Some(Modal::ReloadBeforeDelete);
+                    return;
+                }
                 if let Some(id) = self.selected_id {
                     if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
                         self.modal = Some(Modal::Delete {
@@ -1013,7 +1045,7 @@ impl EJournalApp {
         let new_entry = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
         let find = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
-        if ctx.input_mut(|input| input.consume_shortcut(&save)) {
+        if ctx.input_mut(|input| input.consume_shortcut(&save)) && self.is_dirty() {
             actions.push(Action::Save);
         }
         if ctx.input_mut(|input| input.consume_shortcut(&new_entry)) {
@@ -1123,20 +1155,14 @@ impl EJournalApp {
         ui.add_space(2.0);
         ui.separator();
 
-        let visible_ids: HashSet<EntryId> = self.visible_ids.iter().copied().collect();
-        let visible_entries = self
-            .entries
-            .iter()
-            .filter(|entry| visible_ids.contains(&entry.id))
-            .collect::<Vec<_>>();
-        let visible_count = visible_entries.len();
+        let visible_count = self.visible_indices.len();
         let list_height = (ui.available_height() - 88.0).max(120.0);
         ScrollArea::vertical()
             .id_salt("entry_list")
             .max_height(list_height)
             .auto_shrink([false, false])
-            .show_rows(ui, 62.0, visible_entries.len(), |ui, row_range| {
-                if visible_entries.is_empty() {
+            .show_rows(ui, 62.0, visible_count, |ui, row_range| {
+                if visible_count == 0 {
                     let message = if self.entries.is_empty() {
                         "No entries yet. Start with a blank page."
                     } else {
@@ -1151,7 +1177,8 @@ impl EJournalApp {
                     });
                 }
 
-                for entry in &visible_entries[row_range] {
+                for row in row_range {
+                    let entry = &self.entries[self.visible_indices[row]];
                     let selected = !self.is_new && self.selected_id == Some(entry.id);
                     if entry_row(ui, entry, selected, &palette).clicked() {
                         actions.push(Action::Select(entry.id));
@@ -1474,6 +1501,7 @@ impl EJournalApp {
         ui.add_space(2.0);
         let title = ui.add(
             TextEdit::singleline(&mut self.draft.title)
+                .id_salt(("title_editor", self.editor_generation))
                 .hint_text("Title")
                 .font(FontId::proportional(30.0))
                 .desired_width(f32::INFINITY)
@@ -1494,6 +1522,7 @@ impl EJournalApp {
             ui.label(RichText::new("#").color(palette.accent).size(14.0));
             ui.add(
                 TextEdit::singleline(&mut self.draft.tags_text)
+                    .id_salt(("tags_editor", self.editor_generation))
                     .hint_text("tags, separated by commas")
                     .font(FontId::proportional(13.5))
                     .desired_width(f32::INFINITY)
@@ -1530,6 +1559,7 @@ impl EJournalApp {
             .show(ui, |ui| {
                 ui.add(
                     TextEdit::multiline(&mut self.draft.body)
+                        .id_salt(("body_editor", self.editor_generation))
                         .hint_text("Start writing…")
                         .font(FontId::proportional(16.0))
                         .desired_width(f32::INFINITY)
@@ -1776,6 +1806,47 @@ impl EJournalApp {
                             }
                             if ui.button("Discard and close").clicked() {
                                 modal_action = Some(Action::DiscardAndClose);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                }
+                Modal::ReloadBeforeDelete => {
+                    let draft_dirty = self.is_dirty();
+                    ui.heading("Reload before deleting");
+                    ui.add_space(4.0);
+                    ui.add(
+                        Label::new(
+                            "This entry changed in another window. Reload the latest version \
+                             and review it before deleting.",
+                        )
+                        .wrap(),
+                    );
+                    if draft_dirty {
+                        ui.add_space(8.0);
+                        ui.add(
+                            Label::new(
+                                RichText::new(
+                                    "Your unsaved draft will be discarded when the entry                                      reloads.",
+                                )
+                                .small()
+                                .color(palette.danger),
+                            )
+                            .wrap(),
+                        );
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if draft_dirty {
+                                "Discard draft and reload"
+                            } else {
+                                "Reload entry"
+                            };
+                            if primary_button(ui, label, &palette, 190.0).clicked() {
+                                modal_action = Some(Action::ConfirmRevert);
                             }
                             if ui.button("Cancel").clicked() {
                                 cancel = true;
@@ -2365,6 +2436,83 @@ mod tests {
     }
 
     #[test]
+    fn editor_generation_changes_when_the_draft_is_replaced() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let opened = app.editor_generation;
+        assert!(opened > 0);
+
+        app.perform_switch(EditorTarget::New);
+        assert!(app.editor_generation > opened);
+    }
+
+    #[test]
+    fn deletion_requires_reloading_a_stale_editor() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let base = app.base_entry.as_ref().unwrap().revision;
+
+        let external = EntryDraft {
+            title: "External title".into(),
+            body: "Changed elsewhere.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.update_entry(id, base, &external).unwrap();
+        app.refresh_data().unwrap();
+
+        app.apply_action(&ctx, Action::RequestDelete);
+        assert!(matches!(app.modal, Some(Modal::ReloadBeforeDelete)));
+        assert!(app.storage.get_entry(id).unwrap().is_some());
+
+        app.apply_action(&ctx, Action::ConfirmRevert);
+        assert_eq!(app.draft.title, "External title");
+        app.apply_action(&ctx, Action::RequestDelete);
+        assert!(matches!(app.modal, Some(Modal::Delete { .. })));
+    }
+
+    #[test]
+    fn import_conflict_refreshes_the_visible_journal() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let expected_revisions = app.storage.revision_snapshot().unwrap();
+
+        let external = EntryDraft {
+            title: "Saved elsewhere".into(),
+            body: String::new(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.create_entry(&external).unwrap();
+
+        let now = Utc::now();
+        let imported = vec![JournalEntry {
+            id: 99,
+            revision: 0,
+            title: "Imported".into(),
+            body: String::new(),
+            created_at: now,
+            updated_at: now,
+            tags: Vec::new(),
+        }];
+        app.apply_import(imported, expected_revisions);
+
+        assert_eq!(app.entries.len(), 2);
+        assert_eq!(app.storage.list_entries().unwrap().len(), 2);
+        assert!(matches!(
+            app.notice.as_ref().map(|notice| &notice.kind),
+            Some(NoticeKind::Error)
+        ));
+    }
+
+    #[test]
     fn revert_requires_confirmation() {
         let ctx = egui::Context::default();
         let mut app = test_app(Theme::Warm);
@@ -2419,12 +2567,13 @@ mod tests {
             storage,
             db_path: PathBuf::from("/tmp/journal-test.sqlite3"),
             entries: Vec::new(),
-            visible_ids: Vec::new(),
+            visible_indices: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
             base_entry: None,
             is_new: false,
             draft: EntryDraft::default(),
+            editor_generation: 0,
             search: String::new(),
             tag_filter: None,
             tab: MainTab::Entry,

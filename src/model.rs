@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_casefold::UnicodeCaseFold;
 
 /// Stable identity for a stored journal entry.
 pub type EntryId = i64;
@@ -134,11 +135,7 @@ pub fn normalize_tags(input: &str) -> Vec<String> {
 /// normal sigma (`σ`) otherwise compare differently. Case folding maps both to
 /// the normal form.
 fn fold_case(input: &str) -> String {
-    input
-        .chars()
-        .flat_map(char::to_lowercase)
-        .map(|character| if character == 'ς' { 'σ' } else { character })
-        .collect()
+    input.case_fold().collect()
 }
 
 /// Render tags as the comma-separated text shown in the editor.
@@ -304,18 +301,26 @@ mod tests {
 
     #[test]
     fn search_folds_greek_sigma_variants() {
-        let entry = entry("ΟΣ", "Body text", &["ΟΣ"]);
+        let greek_entry = entry("ΟΣ", "Body text", &["ΟΣ"]);
         assert!(SearchFilter {
             query: "οσ".into(),
             tag: None,
         }
-        .matches(&entry));
+        .matches(&greek_entry));
         assert!(SearchFilter {
             query: String::new(),
             tag: Some("οσ".into()),
         }
-        .matches(&entry));
+        .matches(&greek_entry));
         assert_eq!(normalize_tags("ΟΣ"), vec!["οσ"]);
+
+        let german_entry = entry("Straße", "Body text", &["Straße"]);
+        assert!(SearchFilter {
+            query: "STRASSE".into(),
+            tag: Some("STRASSE".into()),
+        }
+        .matches(&german_entry));
+        assert_eq!(normalize_tags("Straße"), vec!["strasse"]);
     }
 
     #[test]
