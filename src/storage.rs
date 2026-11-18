@@ -114,6 +114,12 @@ pub enum StorageError {
     #[error("Entry {0} was changed by another instance. Reload it before saving again.")]
     Conflict(EntryId),
 
+    #[error(
+        "The journal changed since this action was confirmed. Review the current entries \
+         and try again."
+    )]
+    JournalChanged,
+
     #[error("Could not restrict access to {path}: {source}")]
     RestrictAccess {
         path: PathBuf,
@@ -337,6 +343,10 @@ impl Storage {
         }
         tx.execute("DELETE FROM entry_tags WHERE entry_id = ?1", [id])?;
         set_tags(&tx, id, &input.tags)?;
+        tx.execute(
+            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM entry_tags)",
+            [],
+        )?;
 
         let saved = entry_by_id(&tx, id)?.ok_or(StorageError::NotFound(id))?;
         tx.commit()?;
@@ -395,57 +405,36 @@ impl Storage {
         Ok(tags)
     }
 
+    /// Capture the ids and revisions the UI is showing before a destructive
+    /// action. A restore must compare against this snapshot inside its
+    /// transaction.
+    pub fn revision_snapshot(&self) -> Result<Vec<(EntryId, i64)>, StorageError> {
+        revision_snapshot_from(&self.conn)
+    }
+
     /// Replace every stored entry (used by backup restore) in a single
     /// transaction. IDs and timestamps are preserved when they are safely
     /// below the storage limit; otherwise IDs are remapped to leave room for
     /// new entries. Every restored entry gets a fresh revision.
     pub fn replace_all_entries(&mut self, entries: &[JournalEntry]) -> Result<(), StorageError> {
-        let mut ids = HashSet::with_capacity(entries.len());
-        for entry in entries {
-            if entry.id <= 0 {
-                return Err(StorageError::EntryIdOutOfRange(entry.id));
-            }
-            if !ids.insert(entry.id) {
-                return Err(StorageError::DuplicateEntryId(entry.id));
-            }
-        }
-
-        let remap_ids = entries.iter().any(|entry| entry.id > MAX_SAFE_RESTORE_ID);
-        let remapped_ids = if remap_ids {
-            let mut order = (0..entries.len()).collect::<Vec<_>>();
-            order.sort_by_key(|&index| entries[index].id);
-            let mut ids = vec![0; entries.len()];
-            for (position, index) in order.into_iter().enumerate() {
-                ids[index] = i64::try_from(position + 1)
-                    .map_err(|_| StorageError::EntryIdOutOfRange(i64::MAX))?;
-            }
-            Some(ids)
-        } else {
-            None
-        };
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM entry_tags", [])?;
-        tx.execute("DELETE FROM tags", [])?;
-        tx.execute("DELETE FROM entries", [])?;
-        tx.execute("DELETE FROM sqlite_sequence WHERE name = 'entries'", [])?;
+        replace_all_in_tx(&tx, entries)?;
+        tx.commit()?;
+        Ok(())
+    }
 
-        for (index, entry) in entries.iter().enumerate() {
-            let id = remapped_ids.as_ref().map_or(entry.id, |ids| ids[index]);
-            let revision = next_revision(&tx)?;
-            tx.execute(
-                "INSERT INTO entries (id, title, body, created_at, updated_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    id,
-                    entry.title,
-                    entry.body,
-                    format_timestamp(entry.created_at),
-                    format_timestamp(entry.updated_at),
-                    revision
-                ],
-            )?;
-            set_tags(&tx, id, &entry.tags)?;
+    /// Replace every entry only if the journal still matches the revisions
+    /// shown when the user confirmed the restore.
+    pub fn replace_all_entries_checked(
+        &mut self,
+        entries: &[JournalEntry],
+        expected: &[(EntryId, i64)],
+    ) -> Result<(), StorageError> {
+        let tx = self.conn.transaction()?;
+        if revision_snapshot_from(&tx)? != expected {
+            return Err(StorageError::JournalChanged);
         }
+        replace_all_in_tx(&tx, entries)?;
         tx.commit()?;
         Ok(())
     }
@@ -558,6 +547,66 @@ fn tags_for_entry(conn: &Connection, id: EntryId) -> Result<Vec<String>, Storage
         tags.push(tag?);
     }
     Ok(tags)
+}
+
+fn revision_snapshot_from(conn: &Connection) -> Result<Vec<(EntryId, i64)>, StorageError> {
+    let mut stmt = conn.prepare("SELECT id, revision FROM entries ORDER BY id")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let mut revisions = Vec::new();
+    for row in rows {
+        revisions.push(row?);
+    }
+    Ok(revisions)
+}
+
+fn replace_all_in_tx(tx: &Transaction<'_>, entries: &[JournalEntry]) -> Result<(), StorageError> {
+    let mut ids = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if entry.id <= 0 {
+            return Err(StorageError::EntryIdOutOfRange(entry.id));
+        }
+        if !ids.insert(entry.id) {
+            return Err(StorageError::DuplicateEntryId(entry.id));
+        }
+    }
+
+    let remap_ids = entries.iter().any(|entry| entry.id > MAX_SAFE_RESTORE_ID);
+    let remapped_ids = if remap_ids {
+        let mut order = (0..entries.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| entries[index].id);
+        let mut ids = vec![0; entries.len()];
+        for (position, index) in order.into_iter().enumerate() {
+            ids[index] = i64::try_from(position + 1)
+                .map_err(|_| StorageError::EntryIdOutOfRange(i64::MAX))?;
+        }
+        Some(ids)
+    } else {
+        None
+    };
+
+    tx.execute("DELETE FROM entry_tags", [])?;
+    tx.execute("DELETE FROM tags", [])?;
+    tx.execute("DELETE FROM entries", [])?;
+    tx.execute("DELETE FROM sqlite_sequence WHERE name = 'entries'", [])?;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let id = remapped_ids.as_ref().map_or(entry.id, |ids| ids[index]);
+        let revision = next_revision(tx)?;
+        tx.execute(
+            "INSERT INTO entries (id, title, body, created_at, updated_at, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                entry.title,
+                entry.body,
+                format_timestamp(entry.created_at),
+                format_timestamp(entry.updated_at),
+                revision
+            ],
+        )?;
+        set_tags(tx, id, &entry.tags)?;
+    }
+    Ok(())
 }
 
 fn next_revision(tx: &Transaction<'_>) -> Result<i64, StorageError> {
@@ -813,6 +862,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage.all_tags().unwrap(), vec!["work".to_owned()]);
+        let tag_rows: i64 = storage
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tag_rows, 1, "removed tag names should be deleted");
     }
 
     #[test]

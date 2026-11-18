@@ -236,6 +236,17 @@ pub fn apply_import(storage: &mut Storage, entries: &[JournalEntry]) -> Result<(
     Ok(())
 }
 
+/// Replace the journal only if it still matches the confirmed revision
+/// snapshot.
+pub fn apply_import_checked(
+    storage: &mut Storage,
+    entries: &[JournalEntry],
+    expected: &[(crate::model::EntryId, i64)],
+) -> Result<(), BackupError> {
+    storage.replace_all_entries_checked(entries, expected)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -346,6 +357,41 @@ mod tests {
         backdated.updated_at = backdated.created_at - chrono::Duration::days(1);
         let parsed = parse(&export_to_string(&[backdated.clone()]).unwrap()).unwrap();
         assert_eq!(parsed, vec![backdated]);
+    }
+
+    #[test]
+    fn checked_import_rejects_a_changed_journal() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let existing = EntryDraft {
+            title: "Existing".into(),
+            body: String::new(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        storage.create_entry(&existing).unwrap();
+        let snapshot = storage.revision_snapshot().unwrap();
+
+        let another = EntryDraft {
+            title: "Saved elsewhere".into(),
+            body: String::new(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        storage.create_entry(&another).unwrap();
+
+        let imported = vec![entry(30, "Restored", &[])];
+        let error = apply_import_checked(&mut storage, &imported, &snapshot).unwrap_err();
+        assert!(matches!(
+            error,
+            BackupError::Storage(StorageError::JournalChanged)
+        ));
+        assert_eq!(storage.list_entries().unwrap().len(), 2);
+
+        let snapshot = storage.revision_snapshot().unwrap();
+        apply_import_checked(&mut storage, &imported, &snapshot).unwrap();
+        assert_eq!(storage.list_entries().unwrap()[0].title, "Restored");
     }
 
     #[test]

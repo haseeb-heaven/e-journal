@@ -119,17 +119,26 @@ pub fn normalize_tags(input: &str) -> Vec<String> {
             continue;
         }
 
-        let tag = tag
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
+        let tag = fold_case(&tag.split_whitespace().collect::<Vec<_>>().join(" "));
         if seen.insert(tag.clone()) {
             tags.push(tag);
         }
     }
 
     tags
+}
+
+/// Unicode-aware case folding for search and tags.
+///
+/// Lowercasing Greek sigma is context-sensitive, so a final sigma (`ς`) and a
+/// normal sigma (`σ`) otherwise compare differently. Case folding maps both to
+/// the normal form.
+fn fold_case(input: &str) -> String {
+    input
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|character| if character == 'ς' { 'σ' } else { character })
+        .collect()
 }
 
 /// Render tags as the comma-separated text shown in the editor.
@@ -152,11 +161,11 @@ impl SearchFilter {
     /// Match every query term against the title or body (case-insensitive) and
     /// optionally require a tag (case-insensitive).
     pub fn matches(&self, entry: &JournalEntry) -> bool {
-        let title = entry.title.to_lowercase();
-        let body = entry.body.to_lowercase();
+        let title = fold_case(&entry.title);
+        let body = fold_case(&entry.body);
 
         let query_matches = self.query.split_whitespace().all(|term| {
-            let term = term.to_lowercase();
+            let term = fold_case(term);
             title.contains(&term) || body.contains(&term)
         });
 
@@ -166,11 +175,11 @@ impl SearchFilter {
 
         match &self.tag {
             Some(tag) => {
-                let tag = tag.trim().to_lowercase();
+                let tag = fold_case(tag.trim());
                 entry
                     .tags
                     .iter()
-                    .any(|entry_tag| entry_tag.to_lowercase() == tag)
+                    .any(|entry_tag| fold_case(entry_tag) == tag)
             }
             None => true,
         }
@@ -291,6 +300,22 @@ mod tests {
         assert!(draft.matches_entry(&entry));
         assert!(draft.has_content());
         assert!(!EntryDraft::default().has_content());
+    }
+
+    #[test]
+    fn search_folds_greek_sigma_variants() {
+        let entry = entry("ΟΣ", "Body text", &["ΟΣ"]);
+        assert!(SearchFilter {
+            query: "οσ".into(),
+            tag: None,
+        }
+        .matches(&entry));
+        assert!(SearchFilter {
+            query: String::new(),
+            tag: Some("οσ".into()),
+        }
+        .matches(&entry));
+        assert_eq!(normalize_tags("ΟΣ"), vec!["οσ"]);
     }
 
     #[test]

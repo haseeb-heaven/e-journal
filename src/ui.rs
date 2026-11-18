@@ -316,6 +316,7 @@ enum Modal {
     Import {
         entries: Vec<JournalEntry>,
         file_name: String,
+        expected_revisions: Vec<(EntryId, i64)>,
     },
 }
 
@@ -338,7 +339,7 @@ enum Action {
     DiscardAndSwitch(EditorTarget),
     SaveBeforeClose,
     DiscardAndClose,
-    ApplyImport(Vec<JournalEntry>),
+    ApplyImport(Vec<JournalEntry>, Vec<(EntryId, i64)>),
 }
 
 /// The native application state.
@@ -349,7 +350,7 @@ pub struct EJournalApp {
     visible_ids: Vec<EntryId>,
     tags: Vec<String>,
     selected_id: Option<EntryId>,
-    base_revision: Option<i64>,
+    base_entry: Option<JournalEntry>,
     is_new: bool,
     draft: EntryDraft,
     search: String,
@@ -409,7 +410,7 @@ impl EJournalApp {
             visible_ids: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
-            base_revision: None,
+            base_entry: None,
             is_new: false,
             draft: EntryDraft::default(),
             search: String::new(),
@@ -460,9 +461,10 @@ impl EJournalApp {
 
         if let Some(id) = self.selected_id {
             if !self.entries.iter().any(|entry| entry.id == id) {
+                let had_unsaved_changes = self.is_dirty();
                 self.selected_id = None;
-                self.base_revision = None;
-                if self.draft.has_content() {
+                self.base_entry = None;
+                if had_unsaved_changes {
                     self.is_new = true;
                     self.notice = Some(Notice::info(
                         "That entry was removed outside E-Journal. Your draft is still open; \
@@ -508,7 +510,7 @@ impl EJournalApp {
     fn open_entry(&mut self, id: EntryId) {
         if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
             self.selected_id = Some(id);
-            self.base_revision = Some(entry.revision);
+            self.base_entry = Some(entry.clone());
             self.is_new = false;
             self.draft = EntryDraft::from_entry(entry);
         }
@@ -523,25 +525,20 @@ impl EJournalApp {
     }
 
     fn is_dirty(&self) -> bool {
-        match self.selected_id {
-            Some(id) => self
-                .entries
-                .iter()
-                .find(|entry| entry.id == id)
-                .map_or(self.draft.has_content(), |entry| {
-                    !self.draft.matches_entry(entry)
-                }),
-            None => self.is_new && self.draft.has_content(),
+        match (self.selected_id, self.base_entry.as_ref()) {
+            (Some(_), Some(base)) => !self.draft.matches_entry(base),
+            (Some(_), None) => self.draft.has_content(),
+            (None, _) => self.is_new && self.draft.has_content(),
         }
     }
 
     fn has_stale_revision(&self) -> bool {
-        match (self.selected_id, self.base_revision) {
-            (Some(id), Some(base_revision)) => self
+        match (self.selected_id, self.base_entry.as_ref()) {
+            (Some(id), Some(base)) => self
                 .entries
                 .iter()
                 .find(|entry| entry.id == id)
-                .is_some_and(|entry| entry.revision != base_revision),
+                .is_some_and(|entry| entry.revision != base.revision),
             _ => false,
         }
     }
@@ -562,7 +559,7 @@ impl EJournalApp {
         match target {
             EditorTarget::New => {
                 self.selected_id = None;
-                self.base_revision = None;
+                self.base_entry = None;
                 self.is_new = true;
                 self.draft = EntryDraft::default();
                 self.focus_title = true;
@@ -590,7 +587,8 @@ impl EJournalApp {
         let was_new = self.selected_id.is_none();
         let save_result = match self.selected_id {
             Some(id) => {
-                let Some(expected_revision) = self.base_revision else {
+                let Some(expected_revision) = self.base_entry.as_ref().map(|entry| entry.revision)
+                else {
                     return Err(
                         "This entry is no longer available. Reopen it before saving.".to_owned(),
                     );
@@ -614,7 +612,7 @@ impl EJournalApp {
             }
             Err(StorageError::NotFound(_)) => {
                 self.selected_id = None;
-                self.base_revision = None;
+                self.base_entry = None;
                 self.is_new = true;
                 if let Err(error) = self.refresh_data() {
                     return Err(format!(
@@ -632,7 +630,7 @@ impl EJournalApp {
         };
 
         self.selected_id = Some(saved.id);
-        self.base_revision = Some(saved.revision);
+        self.base_entry = Some(saved.clone());
         self.is_new = false;
         self.draft = EntryDraft::from_entry(&saved);
 
@@ -659,7 +657,7 @@ impl EJournalApp {
             Ok(true) => {
                 if self.selected_id == Some(id) {
                     self.selected_id = None;
-                    self.base_revision = None;
+                    self.base_entry = None;
                     self.is_new = false;
                     self.draft = EntryDraft::default();
                 }
@@ -700,12 +698,16 @@ impl EJournalApp {
         }
     }
 
-    fn apply_import(&mut self, entries: Vec<JournalEntry>) {
+    fn apply_import(
+        &mut self,
+        entries: Vec<JournalEntry>,
+        expected_revisions: Vec<(EntryId, i64)>,
+    ) {
         let imported_count = entries.len();
-        match backup::apply_import(&mut self.storage, &entries) {
+        match backup::apply_import_checked(&mut self.storage, &entries, &expected_revisions) {
             Ok(()) => {
                 self.selected_id = None;
-                self.base_revision = None;
+                self.base_entry = None;
                 self.is_new = false;
                 self.draft = EntryDraft::default();
                 match self.refresh_data() {
@@ -720,6 +722,12 @@ impl EJournalApp {
                         )));
                     }
                 }
+            }
+            Err(backup::BackupError::Storage(StorageError::JournalChanged)) => {
+                self.notice = Some(Notice::error(
+                    "The journal changed after you opened this import. Review the current \
+                     entries and import again. Nothing was changed.",
+                ));
             }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
@@ -788,12 +796,26 @@ impl EJournalApp {
 
         match backup::read_backup(&path) {
             Ok(entries) => {
+                let expected_revisions = match self.storage.revision_snapshot() {
+                    Ok(revisions) => revisions,
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "Could not verify the current journal, so the import was not \
+                             opened. Your journal was not changed. {error}"
+                        )));
+                        return;
+                    }
+                };
                 let file_name = path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("backup")
                     .to_owned();
-                self.modal = Some(Modal::Import { entries, file_name });
+                self.modal = Some(Modal::Import {
+                    entries,
+                    file_name,
+                    expected_revisions,
+                });
             }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
@@ -882,15 +904,52 @@ impl EJournalApp {
             Action::ConfirmRevert => {
                 self.modal = None;
                 if let Some(id) = self.selected_id {
-                    if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
-                        self.draft = EntryDraft::from_entry(entry);
-                        self.base_revision = Some(entry.revision);
+                    match self.storage.get_entry(id) {
+                        Ok(Some(entry)) => {
+                            self.draft = EntryDraft::from_entry(&entry);
+                            self.base_entry = Some(entry);
+                            if let Err(error) = self.refresh_data() {
+                                self.notice = Some(Notice::info(format!(
+                                    "Reloaded the entry, but the journal list could not \
+                                     refresh: {error}"
+                                )));
+                            } else {
+                                self.notice = Some(Notice::info("Reloaded the latest entry."));
+                            }
+                        }
+                        Ok(None) => {
+                            let had_unsaved_changes = self.is_dirty();
+                            self.selected_id = None;
+                            self.base_entry = None;
+                            if had_unsaved_changes {
+                                self.is_new = true;
+                                self.notice = Some(Notice::error(
+                                    "That entry was deleted outside E-Journal. Your draft is \
+                                     still open; save it to keep it as a new entry.",
+                                ));
+                            } else {
+                                self.is_new = false;
+                                self.draft = EntryDraft::default();
+                                self.notice = Some(Notice::error("That entry no longer exists."));
+                            }
+                            if let Err(error) = self.refresh_data() {
+                                self.notice = Some(Notice::error(format!(
+                                    "The entry is gone, and the journal list could not \
+                                     refresh: {error}"
+                                )));
+                            }
+                        }
+                        Err(error) => {
+                            self.notice = Some(Notice::error(format!(
+                                "Could not reload the entry. Your draft is unchanged. {error}"
+                            )));
+                        }
                     }
                 } else if self.is_new {
                     self.draft = EntryDraft::default();
-                    self.base_revision = None;
+                    self.base_entry = None;
+                    self.notice = Some(Notice::info("Discarded the new entry draft."));
                 }
-                self.notice = Some(Notice::info("Reverted unsaved changes."));
             }
             Action::RequestDelete => {
                 if let Some(id) = self.selected_id {
@@ -926,7 +985,9 @@ impl EJournalApp {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
-            Action::ApplyImport(entries) => self.apply_import(entries),
+            Action::ApplyImport(entries, expected_revisions) => {
+                self.apply_import(entries, expected_revisions)
+            }
         }
 
         ctx.request_repaint();
@@ -1764,8 +1825,12 @@ impl EJournalApp {
                         });
                     });
                 }
-                Modal::Import { entries, file_name } => {
-                    let current_count = self.entries.len();
+                Modal::Import {
+                    entries,
+                    file_name,
+                    expected_revisions,
+                } => {
+                    let current_count = expected_revisions.len();
                     let draft_dirty = self.is_dirty();
                     ui.heading("Replace your journal?");
                     ui.add_space(4.0);
@@ -1819,7 +1884,10 @@ impl EJournalApp {
                                 )
                                 .clicked()
                             {
-                                modal_action = Some(Action::ApplyImport(entries.clone()));
+                                modal_action = Some(Action::ApplyImport(
+                                    entries.clone(),
+                                    expected_revisions.clone(),
+                                ));
                             }
                             if ui.button("Cancel").clicked() {
                                 cancel = true;
@@ -2078,7 +2146,7 @@ mod tests {
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
         app.open_entry(id);
-        let base = app.base_revision.unwrap();
+        let base = app.base_entry.as_ref().unwrap().revision;
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         let external = EntryDraft {
@@ -2099,7 +2167,7 @@ mod tests {
             "External edit"
         );
         assert_eq!(app.draft.title, "Stale edit");
-        assert_eq!(app.base_revision, Some(base));
+        assert_eq!(app.base_entry.as_ref().unwrap().revision, base);
         assert_eq!(app.entries[0].title, "External edit");
     }
 
@@ -2110,7 +2178,7 @@ mod tests {
         let id = app.entries[0].id;
         app.open_entry(id);
         app.storage
-            .delete_entry(id, app.base_revision.unwrap())
+            .delete_entry(id, app.base_entry.as_ref().unwrap().revision)
             .unwrap();
         app.draft.title = "Keep this draft".into();
 
@@ -2132,7 +2200,7 @@ mod tests {
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
         app.open_entry(id);
-        let stale_revision = app.base_revision.unwrap();
+        let stale_revision = app.base_entry.as_ref().unwrap().revision;
 
         let external = EntryDraft {
             title: "External title".into(),
@@ -2171,7 +2239,7 @@ mod tests {
         app.draft.body.push_str(" Still editing.");
 
         app.storage
-            .delete_entry(id, app.base_revision.unwrap())
+            .delete_entry(id, app.base_entry.as_ref().unwrap().revision)
             .unwrap();
         app.refresh_data().unwrap();
 
@@ -2245,6 +2313,58 @@ mod tests {
     }
 
     #[test]
+    fn external_save_does_not_dirty_an_untouched_draft() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let base = app.base_entry.as_ref().unwrap().revision;
+
+        let external = EntryDraft {
+            title: "External title".into(),
+            body: "Changed elsewhere.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.update_entry(id, base, &external).unwrap();
+        app.refresh_data().unwrap();
+
+        assert!(!app.is_dirty());
+        assert!(app.has_stale_revision());
+    }
+
+    #[test]
+    fn revert_reads_the_latest_entry_from_storage() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let base = app.base_entry.as_ref().unwrap().revision;
+
+        let external = EntryDraft {
+            title: "External title".into(),
+            body: "Changed elsewhere.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        let external_entry = app.storage.update_entry(id, base, &external).unwrap();
+        app.draft.title = "My unsaved title".into();
+
+        app.apply_action(&ctx, Action::Revert);
+        app.apply_action(&ctx, Action::ConfirmRevert);
+
+        assert_eq!(app.draft.title, "External title");
+        assert_eq!(
+            app.base_entry.as_ref().unwrap().revision,
+            external_entry.revision
+        );
+        assert_eq!(app.entries[0].title, "External title");
+    }
+
+    #[test]
     fn revert_requires_confirmation() {
         let ctx = egui::Context::default();
         let mut app = test_app(Theme::Warm);
@@ -2302,7 +2422,7 @@ mod tests {
             visible_ids: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
-            base_revision: None,
+            base_entry: None,
             is_new: false,
             draft: EntryDraft::default(),
             search: String::new(),
@@ -2376,6 +2496,7 @@ mod tests {
         app.modal = Some(Modal::Import {
             entries: app.entries.clone(),
             file_name: "backup.json".into(),
+            expected_revisions: Vec::new(),
         });
         render(&mut app);
     }
