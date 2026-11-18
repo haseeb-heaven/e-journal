@@ -1,17 +1,18 @@
-# Journal
+# E-Journal
 
 **A quiet, local-first journal for the desktop.**
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 
-Journal is a private, single-user desktop journal built in Rust with
+E-Journal is a private, single-user desktop journal built in Rust with
 [egui](https://github.com/emilk/egui) and SQLite. It opens like a notebook:
 your entries on the left, a calm writing surface on the right. No account, no
 cloud, and no background synchronization.
 
-![Journal in the Warm theme](docs/screenshots/journal-warm.png)
+![E-Journal in the Warm theme](docs/screenshots/journal-warm.png)
 
 ## Highlights
 
@@ -24,6 +25,7 @@ cloud, and no background synchronization.
 - **Confirmed deletes** — destructive actions require an explicit confirmation.
 - **JSON backup and restore** — validated before import and applied in a single transaction.
 - **Visible failures** — save, database, and backup errors are reported in the UI instead of being swallowed.
+- **Tested end to end** — unit tests plus process-level E2E tests that run the real binary.
 
 ## Screenshots
 
@@ -41,9 +43,17 @@ cloud, and no background synchronization.
 
 The screenshots were captured from the running desktop application.
 
+## Versioning and changelog
+
+E-Journal follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The current release is **1.0.0**; the application version is shown in the
+window, in `--version`, and in **Settings → About**.
+
+Release history lives in [CHANGELOG.md](CHANGELOG.md).
+
 ## Platform support
 
-Journal is a native cross-platform application. The same Rust codebase runs on:
+E-Journal is a native cross-platform application. The same Rust codebase runs on:
 
 - **macOS**
 - **Windows**
@@ -76,21 +86,21 @@ For a debug build:
 
 ```sh
 cargo build
-./target/debug/journal-app
+./target/debug/e-journal
 ```
 
 The application creates its database automatically on first launch.
 
 ## Where your journal lives
 
-Journal stores its SQLite database in the operating system's per-user
+E-Journal stores its SQLite database in the operating system's per-user
 application data directory:
 
 | Platform | Database path |
 | --- | --- |
-| macOS | `~/Library/Application Support/com.JournalApp.Journal/journal.sqlite3` |
-| Windows | `%APPDATA%\JournalApp\Journal\data\journal.sqlite3` |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/journal/journal.sqlite3` |
+| macOS | `~/Library/Application Support/com.HaseebHeaven.E-Journal/e-journal.sqlite3` |
+| Windows | `%APPDATA%\HaseebHeaven\E-Journal\data\e-journal.sqlite3` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/e-journal/e-journal.sqlite3` |
 
 The exact path is shown in **Settings → Your data**.
 
@@ -128,15 +138,38 @@ Preferences are stored alongside the journal and survive restarts.
 | Save entry | `Cmd/Ctrl+S` |
 | Focus search | `Cmd/Ctrl+F` |
 
+### Command line
+
+```text
+Usage: e-journal [OPTIONS]
+
+  -h, --help        Show help
+  -V, --version     Show the application version
+      --smoke-test  Run the end-to-end smoke test
+```
+
+The smoke test requires a disposable directory:
+
+```sh
+E_JOURNAL_SMOKE_DIR=/tmp/e-journal-smoke ./target/release/e-journal --smoke-test
+```
+
+It exercises database creation, CRUD, settings, backup export, delete,
+transactional restore, and reopening the database without opening a window.
+
 ## Architecture
 
 ```text
 src/
-├── main.rs      Startup, database location, native eframe lifecycle
+├── main.rs      CLI modes, startup, database location, native eframe lifecycle
 ├── model.rs     Entry types, validation, tag normalization, search matching
 ├── storage.rs   SQLite schema/migrations, CRUD, queries, settings
 ├── backup.rs    Versioned JSON backup validation and transactional restore
+├── smoke.rs     Headless end-to-end workflow used by the E2E suite
 └── ui.rs        App state, themes, entry list/editor, settings, feedback
+
+tests/
+└── cli_e2e.rs   Process-level E2E tests driven by assert_cmd
 ```
 
 Design boundaries:
@@ -156,14 +189,20 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build
+cargo build --release
 ```
 
-The test suite covers:
+The suite currently includes **32 unit tests** and **5 process-level E2E
+tests** (`assert_cmd`) covering:
 
-- entry validation, tag normalization, search, and filters;
+- entry validation, tag normalization, search, filters, and CLI parsing;
 - schema initialization, CRUD, timestamps, settings, and transactional restore;
-- backup round-trips, malformed files, unsupported versions, duplicate ids;
-- UI rendering in every theme, the welcome screen, new entries, and modal states.
+- backup round-trips, malformed files, unsupported versions, and duplicate ids;
+- UI rendering in every theme, the welcome screen, new entries, and modal states;
+- running the real binary for `--version`, `--help`, `--smoke-test`, and the
+  complete create/update/export/delete/import/reopen workflow.
+
+Code is reviewed with OpenQodex before release pushes.
 
 ## Branches
 

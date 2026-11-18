@@ -1,13 +1,13 @@
-# Journal App Design
+# E-Journal Design
 
 ## Goal
 
-Build a clean, single-user native journal application in the isolated `Rust/journal-app` project. The app persists entries locally in SQLite and provides a polished `egui` interface with four themes and a settings tab.
+Build a clean, single-user native E-Journal application in the isolated `Rust/e-journal` project. The app persists entries locally in SQLite and provides a polished `egui` interface with four themes and a settings tab.
 
 ## Project boundaries
 
-- This is a standalone Cargo project under `Rust/journal-app`; it does not modify the parent Rust workspace manifest or its Git configuration.
-- Initialize a Git repository inside `Rust/journal-app` only.
+- This is a standalone Cargo project under `Rust/e-journal`; it does not modify the parent Rust workspace manifest or its Git configuration.
+- Initialize a Git repository inside `Rust/e-journal` only.
 - The first release is local-only: no accounts, remote service, or cross-device sync.
 - Journal content remains on the user's computer unless explicitly exported.
 
@@ -55,7 +55,7 @@ Build a clean, single-user native journal application in the isolated `Rust/jour
 
 - Unit tests cover entry validation, tag normalization, search/filter behavior, theme and text-size settings, and backup serialization/validation.
 - Storage tests use temporary SQLite databases and cover schema initialization, CRUD, search, tags, and transactional import behavior.
-- Run `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo build` in `Rust/journal-app`.
+- Run `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo build` in `Rust/e-journal`.
 - Manually launch the desktop app to verify every theme, the settings tab, entry workflows, persistence after restart, and backup import/export where the environment supports GUI execution.
 
 ## Explicit non-goals
