@@ -1830,6 +1830,7 @@ impl EJournalApp {
 
         let palette = self.theme.palette();
         let mut cancel = false;
+        let mut apply_import = false;
         let mut modal_action = None;
 
         let response = egui::Modal::new(Id::unique("journal_modal")).show(ctx, |ui| {
@@ -2081,10 +2082,7 @@ impl EJournalApp {
                                 )
                                 .clicked()
                             {
-                                modal_action = Some(Action::ApplyImport(
-                                    entries.clone(),
-                                    expected_revisions.clone(),
-                                ));
+                                apply_import = true;
                             }
                             if ui.button("Cancel").clicked() {
                                 cancel = true;
@@ -2094,6 +2092,18 @@ impl EJournalApp {
                 }
             }
         });
+
+        if apply_import {
+            if let Modal::Import {
+                entries,
+                expected_revisions,
+                ..
+            } = modal
+            {
+                actions.push(Action::ApplyImport(entries, expected_revisions));
+            }
+            return;
+        }
 
         if let Some(action) = modal_action {
             self.modal = None;

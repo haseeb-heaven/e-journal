@@ -69,7 +69,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timestamps, refuses to restore if the journal changed before confirmation, and
   still allows recovery from a malformed entry. A conflict refreshes the visible
   journal before another confirmation can be opened.
-- The import confirmation warns before discarding an unsaved draft.
+- The import confirmation warns before discarding an unsaved draft and moves the
+  validated entries into the restore action instead of cloning every body.
 - Save failures in switch and close confirmations are shown in the UI.
 - Exports and editor loads read entries and tags from consistent database
   snapshots instead of mixing revisions.
