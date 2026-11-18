@@ -590,6 +590,27 @@ impl EJournalApp {
 
     fn request_switch(&mut self, target: EditorTarget) {
         if self.current_target() == Some(target) {
+            if let EditorTarget::Entry { id, .. } = target {
+                match self.storage.get_entry(id) {
+                    Ok(Some(entry))
+                        if self.base_entry.as_ref().map(|base| base.revision)
+                            != Some(entry.revision) =>
+                    {
+                        self.modal = Some(Modal::ConfirmRevert);
+                    }
+                    Ok(None) => {
+                        self.notice =
+                            Some(Notice::error("That entry is no longer in the journal."));
+                        self.reload_data();
+                    }
+                    Ok(Some(_)) => {}
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "Could not check the entry for changes: {error}"
+                        )));
+                    }
+                }
+            }
             return;
         }
 
@@ -1490,14 +1511,17 @@ impl EJournalApp {
         }
 
         let palette = self.theme.palette();
-        let selected_entry = self
-            .selected_id
-            .and_then(|id| self.entries.iter().find(|entry| entry.id == id).cloned());
+        let selected_created_at = self.selected_id.and_then(|id| {
+            self.entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.created_at)
+        });
+        let has_selected_entry = selected_created_at.is_some();
 
         ui.horizontal(|ui| {
-            let date = selected_entry
-                .as_ref()
-                .map(|entry| format_full_date(entry.created_at))
+            let date = selected_created_at
+                .map(format_full_date)
                 .unwrap_or_else(|| Local::now().format("%A, %B %d, %Y").to_string());
             ui.label(RichText::new(date).small().color(palette.weak_text));
 
@@ -1510,7 +1534,7 @@ impl EJournalApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if selected_entry.is_some()
+                if has_selected_entry
                     && ui
                         .add(
                             Button::new(RichText::new("Delete").small().color(palette.danger))
@@ -1562,15 +1586,21 @@ impl EJournalApp {
 
         let normalized_tags = normalize_tags(&self.draft.tags_text);
         if !normalized_tags.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                for tag in normalized_tags {
-                    ui.label(
-                        RichText::new(format!("#{tag}"))
-                            .small()
-                            .color(palette.accent),
-                    );
-                }
-            });
+            ScrollArea::vertical()
+                .id_salt("entry_tag_preview")
+                .max_height(54.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for tag in normalized_tags {
+                            ui.label(
+                                RichText::new(format!("#{tag}"))
+                                    .small()
+                                    .color(palette.accent),
+                            );
+                        }
+                    });
+                });
         }
 
         ui.add_space(4.0);
@@ -2109,11 +2139,25 @@ fn normalized_path(path: &Path) -> PathBuf {
     }
 }
 
+fn normalized_paths_match(left: &Path, right: &Path) -> bool {
+    let left = normalized_path(left);
+    let right = normalized_path(right);
+
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        left == right
+    }
+}
+
 fn export_destination_is_database(path: &Path, db_path: &Path) -> bool {
     ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
         let candidate = sqlite_related_path(db_path, suffix);
         same_file::is_same_file(path, &candidate)
-            .unwrap_or_else(|_| normalized_path(path) == normalized_path(&candidate))
+            .unwrap_or_else(|_| normalized_paths_match(path, &candidate))
     })
 }
 
@@ -2371,6 +2415,12 @@ mod tests {
             &db_path
         ));
 
+        #[cfg(any(windows, target_os = "macos"))]
+        assert!(export_destination_is_database(
+            &sqlite_related_path(&db_path, "-WAL"),
+            &db_path
+        ));
+
         #[cfg(unix)]
         {
             let link = dir.path().join("linked-backup.json");
@@ -2437,6 +2487,33 @@ mod tests {
         app.draft.title = "Edited after reload".into();
         app.save_current().unwrap();
         assert_eq!(app.entries[0].title, "Edited after reload");
+    }
+
+    #[test]
+    fn reselecting_the_current_entry_prompts_for_a_newer_revision() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry_cached(id);
+        let base = app.base_entry.as_ref().unwrap().revision;
+
+        let external = EntryDraft {
+            title: "External title".into(),
+            body: "Changed elsewhere.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.update_entry(id, base, &external).unwrap();
+
+        let target = app.current_target().unwrap();
+        app.request_switch(target);
+        assert!(matches!(app.modal, Some(Modal::ConfirmRevert)));
+        assert_eq!(app.draft.title, "A test entry");
+
+        app.apply_action(&ctx, Action::ConfirmRevert);
+        assert_eq!(app.draft.title, "External title");
     }
 
     #[test]

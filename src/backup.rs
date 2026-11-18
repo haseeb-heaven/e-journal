@@ -346,6 +346,13 @@ mod tests {
             parse(&export_to_string(&[negative]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
+
+        let mut null_tag = entry(6, "Null tag", &[]);
+        null_tag.tags = vec!["bad\0tag".into()];
+        assert!(matches!(
+            parse(&export_to_string(&[null_tag]).unwrap()),
+            Err(BackupError::InvalidEntry { index: 0, .. })
+        ));
     }
 
     #[test]

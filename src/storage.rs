@@ -108,6 +108,9 @@ pub enum StorageError {
     #[error("A journal replacement cannot contain duplicate entry id {0}.")]
     DuplicateEntryId(EntryId),
 
+    #[error("A journal replacement contains a tag with a null character.")]
+    NullInTag,
+
     #[error("Entry id {0} is outside the range this journal supports.")]
     EntryIdOutOfRange(EntryId),
 
@@ -587,6 +590,9 @@ fn replace_all_in_tx(tx: &Transaction<'_>, entries: &[JournalEntry]) -> Result<(
         }
         if !ids.insert(entry.id) {
             return Err(StorageError::DuplicateEntryId(entry.id));
+        }
+        if entry.tags.iter().any(|tag| tag.contains('\0')) {
+            return Err(StorageError::NullInTag);
         }
     }
 
@@ -1129,6 +1135,14 @@ mod tests {
         }];
         let error = storage.replace_all_entries(&out_of_range).unwrap_err();
         assert!(matches!(error, StorageError::EntryIdOutOfRange(0)));
+        assert_same_content(&storage.list_entries().unwrap(), &replacement);
+
+        let null_tag = vec![JournalEntry {
+            tags: vec!["bad\0tag".into()],
+            ..replacement[0].clone()
+        }];
+        let error = storage.replace_all_entries(&null_tag).unwrap_err();
+        assert!(matches!(error, StorageError::NullInTag));
         assert_same_content(&storage.list_entries().unwrap(), &replacement);
     }
 

@@ -54,6 +54,9 @@ pub struct ValidatedEntry {
 pub enum ValidationError {
     #[error("Add a title before saving this entry.")]
     EmptyTitle,
+
+    #[error("Tags cannot contain null characters.")]
+    NullInTag,
 }
 
 impl EntryDraft {
@@ -73,10 +76,15 @@ impl EntryDraft {
             return Err(ValidationError::EmptyTitle);
         }
 
+        let tags = normalize_tags(&self.tags_text);
+        if tags.iter().any(|tag| tag.contains('\0')) {
+            return Err(ValidationError::NullInTag);
+        }
+
         Ok(ValidatedEntry {
             title: title.to_owned(),
             body: self.body.trim_end().to_owned(),
-            tags: normalize_tags(&self.tags_text),
+            tags,
         })
     }
 
@@ -232,6 +240,16 @@ mod tests {
         };
         let validated = draft.validate().unwrap();
         assert_eq!(validated.title, "A day at the river");
+    }
+
+    #[test]
+    fn tags_reject_null_characters() {
+        let draft = EntryDraft {
+            title: "Title".into(),
+            body: String::new(),
+            tags_text: "good, bad\0tag".into(),
+        };
+        assert_eq!(draft.validate(), Err(ValidationError::NullInTag));
     }
 
     #[test]

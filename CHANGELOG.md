@@ -38,7 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Backups are written through a private temporary file and atomically replace
   the destination, so a failed export cannot truncate an existing backup.
 - Export refuses to write over the active database or its SQLite sidecar files,
-  and empty journals can still be exported as empty backups.
+  including alternate case spellings on case-insensitive volumes, and empty
+  journals can still be exported as empty backups.
 - Backup files use owner-only permissions on Unix.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
@@ -69,10 +70,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the matching row indices, and the sidebar virtualizes fixed-height rows instead
   of scanning and drawing the whole journal every frame.
 - Journal refresh loads all entry tags in one query instead of one query per
-  entry.
+  entry, and the editor avoids cloning the full body every frame. Tag previews
+  are height-bounded so many tags cannot push the editor controls off screen.
 - Delete and refresh failures are reported alongside the delete result.
-- Editing an entry removes tag names that are no longer used by any entry, and
-  search uses full Unicode case folding.
+- Editing an entry removes tag names that are no longer used by any entry,
+  search uses full Unicode case folding, and tags containing null characters are
+  rejected before storage or restore.
 - The schema migration assigns revisions in one ordered pass.
 - Reverting now requires confirmation before discarding a dirty draft, reloads
   the latest saved entry from SQLite, and remains available when only the stored
@@ -80,7 +83,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - External saves no longer make an untouched editor look dirty, and opening an
   entry reads its latest content and revision from SQLite.
 - Sidebar selections carry the revision the user saw, so a replaced entry is
-  refreshed instead of opened as a different entry.
+  refreshed instead of opened as a different entry. Reselecting the current row
+  also checks SQLite for a newer revision.
 - Editor widgets get a fresh undo history whenever a different draft is loaded.
 - First-launch schema creation takes an immediate write transaction, so
   concurrent launches cannot race.
