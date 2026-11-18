@@ -1953,4 +1953,34 @@ mod tests {
             render(&mut app);
         }
     }
+
+    #[test]
+    fn settings_changes_are_persisted() {
+        let mut app = test_app(Theme::Warm);
+        let ctx = egui::Context::default();
+        configure_context(&ctx, app.theme, app.text_size);
+
+        app.set_theme(&ctx, Theme::Slate);
+        app.set_text_size(&ctx, TextSize::Large);
+        app.set_open_recent(false);
+
+        assert_eq!(
+            app.storage.get_setting(THEME_SETTING).unwrap().as_deref(),
+            Some("slate")
+        );
+        assert_eq!(
+            app.storage
+                .get_setting(TEXT_SIZE_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("large")
+        );
+        assert_eq!(
+            app.storage
+                .get_setting(OPEN_RECENT_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+    }
 }
