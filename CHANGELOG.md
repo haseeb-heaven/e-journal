@@ -42,9 +42,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   written but may not survive a power loss instead of claiming the export
   failed.
 - Export reads its snapshot after the destination is chosen, refuses to write
-  over the active database or its SQLite sidecar files (including alternate case
-  spellings on case-insensitive volumes), and empty journals can still be
-  exported as empty backups.
+  over the active database or its SQLite sidecar files (including symlinked
+  databases and alternate case spellings on case-insensitive volumes), and
+  empty journals can still be exported as empty backups.
 - Backup files use owner-only permissions on Unix. Imports are parsed as a
   stream, and exports borrow entries directly from the database snapshot and
   serialize straight to the temporary file instead of cloning every body, so
@@ -82,9 +82,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately, and failed settings writes are
-  reported and can be retried by selecting the same option again. A failed
-  startup-preference write shows a retry control instead of requiring two
-  toggles.
+  reported and can be retried by selecting the same option again; a successful
+  retry clears the stale failure notice. A failed startup-preference write shows
+  a retry control instead of requiring two toggles.
 - Sidebar rows expose the full entry title and selected state to accessibility
   APIs instead of painting an unlabeled clickable rectangle.
 - Search prepares query terms once, skips text folding for empty queries, filters

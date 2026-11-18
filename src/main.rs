@@ -121,8 +121,8 @@ fn attach_parent_console() {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 ptr::null(),
                 OPEN_EXISTING,
-                0,
-                ptr::null_mut(),
+                0u32,
+                ptr::null_mut::<std::ffi::c_void>(),
             )
         }
     };

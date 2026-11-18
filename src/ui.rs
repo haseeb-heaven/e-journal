@@ -930,7 +930,10 @@ impl EJournalApp {
             .storage
             .set_setting(THEME_SETTING, theme.setting_value())
         {
-            Ok(()) => self.pending_theme = None,
+            Ok(()) => {
+                self.pending_theme = None;
+                self.clear_setting_failure("The theme changed for this session");
+            }
             Err(error) => {
                 self.pending_theme = Some(theme);
                 self.notice = Some(Notice::error(format!(
@@ -951,13 +954,26 @@ impl EJournalApp {
             .storage
             .set_setting(TEXT_SIZE_SETTING, text_size.setting_value())
         {
-            Ok(()) => self.pending_text_size = None,
+            Ok(()) => {
+                self.pending_text_size = None;
+                self.clear_setting_failure("The text size changed for this session");
+            }
             Err(error) => {
                 self.pending_text_size = Some(text_size);
                 self.notice = Some(Notice::error(format!(
                     "The text size changed for this session, but it could not be saved: {error}"
                 )));
             }
+        }
+    }
+
+    fn clear_setting_failure(&mut self, prefix: &str) {
+        if matches!(
+            &self.notice,
+            Some(notice) if matches!(notice.kind, NoticeKind::Error)
+                && notice.message.starts_with(prefix)
+        ) {
+            self.notice = None;
         }
     }
 
@@ -971,7 +987,10 @@ impl EJournalApp {
             OPEN_RECENT_SETTING,
             if open_recent { "true" } else { "false" },
         ) {
-            Ok(()) => self.pending_open_recent = None,
+            Ok(()) => {
+                self.pending_open_recent = None;
+                self.clear_setting_failure("The startup setting changed for this session");
+            }
             Err(error) => {
                 self.pending_open_recent = Some(open_recent);
                 self.notice = Some(Notice::error(format!(
@@ -2250,11 +2269,16 @@ fn normalized_paths_match(left: &Path, right: &Path) -> bool {
 }
 
 fn export_destination_is_database(path: &Path, db_path: &Path) -> bool {
-    ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
-        let candidate = sqlite_related_path(db_path, suffix);
-        same_file::is_same_file(path, &candidate)
-            .unwrap_or_else(|_| normalized_paths_match(path, &candidate))
-    })
+    let canonical_db = db_path.canonicalize().ok();
+    std::iter::once(db_path)
+        .chain(canonical_db.as_deref())
+        .any(|base| {
+            ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
+                let candidate = sqlite_related_path(base, suffix);
+                same_file::is_same_file(path, &candidate)
+                    .unwrap_or_else(|_| normalized_paths_match(path, &candidate))
+            })
+        })
 }
 
 fn primary_button(ui: &mut Ui, label: &str, palette: &Palette, width: f32) -> Response {
@@ -2570,6 +2594,15 @@ mod tests {
             let link = dir.path().join("linked-backup.json");
             std::os::unix::fs::symlink(&db_path, &link).unwrap();
             assert!(export_destination_is_database(&link, &db_path));
+
+            let real_db = dir.path().join("real.sqlite3");
+            std::fs::write(&real_db, "database").unwrap();
+            let linked_db = dir.path().join("linked.sqlite3");
+            std::os::unix::fs::symlink(&real_db, &linked_db).unwrap();
+            assert!(export_destination_is_database(
+                &sqlite_related_path(&real_db, "-wal"),
+                &linked_db
+            ));
         }
     }
 
@@ -2816,6 +2849,21 @@ mod tests {
                 .as_deref(),
             Some("true")
         );
+    }
+
+    #[test]
+    fn successful_setting_retry_clears_the_stale_error() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.notice = Some(Notice::error(
+            "The theme changed for this session, but it could not be saved: disk full",
+        ));
+        app.pending_theme = Some(Theme::Warm);
+
+        app.set_theme(&ctx, Theme::Warm);
+
+        assert!(app.notice.is_none());
+        assert!(app.pending_theme.is_none());
     }
 
     #[test]
