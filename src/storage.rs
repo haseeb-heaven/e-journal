@@ -14,7 +14,7 @@ use crate::model::{
 };
 
 /// Schema version written to `PRAGMA user_version`.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Leave room for new entries after restoring a journal with very high ids.
 const RESTORE_ID_HEADROOM: EntryId = 1_000_000;
@@ -72,6 +72,33 @@ SET value = (SELECT COUNT(*) FROM entries)
 WHERE name = 'revision';
 
 CREATE UNIQUE INDEX entries_revision_idx ON entries(revision);
+"#;
+
+/// Keep the revision token moving when an older Journal build updates or
+/// inserts rows without knowing about revisions. New E-Journal writes set a
+/// fresh revision explicitly, so these triggers leave them alone.
+const SCHEMA_V3: &str = r#"
+CREATE TRIGGER IF NOT EXISTS entries_legacy_insert_revision
+AFTER INSERT ON entries
+FOR EACH ROW
+WHEN NEW.revision = 0
+BEGIN
+    UPDATE counters SET value = value + 1 WHERE name = 'revision';
+    UPDATE entries
+    SET revision = (SELECT value FROM counters WHERE name = 'revision')
+    WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS entries_legacy_update_revision
+AFTER UPDATE OF title, body, created_at, updated_at ON entries
+FOR EACH ROW
+WHEN NEW.revision = OLD.revision
+BEGIN
+    UPDATE counters SET value = value + 1 WHERE name = 'revision';
+    UPDATE entries
+    SET revision = (SELECT value FROM counters WHERE name = 'revision')
+    WHERE id = NEW.id;
+END;
 "#;
 
 #[derive(Debug, Error)]
@@ -191,13 +218,14 @@ impl Storage {
 
         if version < 1 {
             tx.execute_batch(SCHEMA_V1)?;
-            tx.pragma_update(None, "user_version", 1)?;
         }
-
         if version < 2 {
             tx.execute_batch(SCHEMA_V2)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        if version < 3 {
+            tx.execute_batch(SCHEMA_V3)?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
         tx.commit()?;
         Ok(())
@@ -795,6 +823,44 @@ mod tests {
         assert!(storage.get_entry(created.id).unwrap().is_none());
         assert!(storage.all_tags().unwrap().is_empty());
         assert!(!storage.delete_entry(created.id, updated.revision).unwrap());
+    }
+
+    #[test]
+    fn legacy_writes_advance_revisions() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let entry = seed(&mut storage, "Original", "work");
+        let before = entry.revision;
+
+        storage
+            .conn
+            .execute(
+                "UPDATE entries SET title = 'Legacy update', updated_at = ?1 WHERE id = ?2",
+                params![format_timestamp(Utc::now()), entry.id],
+            )
+            .unwrap();
+        let changed = storage.get_entry(entry.id).unwrap().unwrap();
+        assert_eq!(changed.title, "Legacy update");
+        assert!(changed.revision > before);
+        assert!(matches!(
+            storage.update_entry(entry.id, before, &validated("Stale", "body", "work")),
+            Err(StorageError::Conflict(id)) if id == entry.id
+        ));
+
+        storage
+            .conn
+            .execute(
+                "INSERT INTO entries (title, body, created_at, updated_at)
+                 VALUES ('Legacy insert', 'body', ?1, ?1)",
+                [format_timestamp(Utc::now())],
+            )
+            .unwrap();
+        let inserted = storage
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.title == "Legacy insert")
+            .unwrap();
+        assert!(inserted.revision > changed.revision);
     }
 
     #[test]

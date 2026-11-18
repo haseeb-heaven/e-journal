@@ -274,10 +274,15 @@ enum NoticeKind {
     Error,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeContext {
+    Refresh,
+}
+
 struct Notice {
     kind: NoticeKind,
     message: String,
+    context: Option<NoticeContext>,
 }
 
 impl Notice {
@@ -285,6 +290,7 @@ impl Notice {
         Self {
             kind: NoticeKind::Info,
             message: message.into(),
+            context: None,
         }
     }
 
@@ -292,6 +298,7 @@ impl Notice {
         Self {
             kind: NoticeKind::Success,
             message: message.into(),
+            context: None,
         }
     }
 
@@ -299,6 +306,15 @@ impl Notice {
         Self {
             kind: NoticeKind::Error,
             message: message.into(),
+            context: None,
+        }
+    }
+
+    fn refresh_error(message: impl Into<String>) -> Self {
+        Self {
+            kind: NoticeKind::Error,
+            message: message.into(),
+            context: Some(NoticeContext::Refresh),
         }
     }
 }
@@ -523,7 +539,7 @@ impl EJournalApp {
 
     fn reload_data(&mut self) {
         if let Err(error) = self.refresh_data() {
-            self.notice = Some(Notice::error(format!(
+            self.notice = Some(Notice::refresh_error(format!(
                 "Could not refresh your journal: {error}"
             )));
         }
@@ -1137,8 +1153,7 @@ impl EJournalApp {
             Action::Refresh => {
                 let had_refresh_error = matches!(
                     &self.notice,
-                    Some(notice) if matches!(notice.kind, NoticeKind::Error)
-                        && notice.message.starts_with("Could not refresh the journal:")
+                    Some(notice) if notice.context == Some(NoticeContext::Refresh)
                 );
                 if had_refresh_error {
                     self.notice = None;
@@ -1150,7 +1165,7 @@ impl EJournalApp {
                         }
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(format!(
+                        self.notice = Some(Notice::refresh_error(format!(
                             "Could not refresh the journal: {error}"
                         )));
                     }
@@ -2971,7 +2986,9 @@ mod tests {
         .unwrap();
         app.storage.create_entry(&external).unwrap();
 
-        app.notice = Some(Notice::error("Could not refresh the journal: old failure"));
+        app.notice = Some(Notice::refresh_error(
+            "Could not refresh your journal: old failure",
+        ));
         app.apply_action(&ctx, Action::Refresh);
 
         assert_eq!(app.entries.len(), 2);

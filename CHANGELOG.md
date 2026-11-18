@@ -56,7 +56,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   editor cannot overwrite a newer save or a restored entry when the clock moves
   backwards. Read-then-write transactions start with an immediate write lock so
   concurrent windows wait for the configured busy timeout instead of failing
-  with an immediate `SQLITE_BUSY`.
+  with an immediate `SQLITE_BUSY`. Database triggers advance revisions for
+  writes from an older Journal build that still shares the migrated database.
 - Delete confirmations check the revision the user saw, so a replaced entry is
   not removed without a second confirmation, and a stale editor must reload the
   entry before it can be deleted. The dialog warns when deletion or reloading
