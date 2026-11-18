@@ -60,9 +60,12 @@ CREATE TABLE counters (
 INSERT INTO counters (name, value) VALUES ('revision', 0);
 
 UPDATE entries
-SET revision = (
-    SELECT COUNT(*) FROM entries AS older WHERE older.id <= entries.id
-);
+SET revision = ranked.rn
+FROM (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn
+    FROM entries
+) AS ranked
+WHERE entries.id = ranked.id;
 
 UPDATE counters
 SET value = (SELECT COUNT(*) FROM entries)
@@ -408,6 +411,18 @@ impl Storage {
         }
 
         let remap_ids = entries.iter().any(|entry| entry.id > MAX_SAFE_RESTORE_ID);
+        let remapped_ids = if remap_ids {
+            let mut order = (0..entries.len()).collect::<Vec<_>>();
+            order.sort_by_key(|&index| entries[index].id);
+            let mut ids = vec![0; entries.len()];
+            for (position, index) in order.into_iter().enumerate() {
+                ids[index] = i64::try_from(position + 1)
+                    .map_err(|_| StorageError::EntryIdOutOfRange(i64::MAX))?;
+            }
+            Some(ids)
+        } else {
+            None
+        };
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM entry_tags", [])?;
         tx.execute("DELETE FROM tags", [])?;
@@ -415,11 +430,7 @@ impl Storage {
         tx.execute("DELETE FROM sqlite_sequence WHERE name = 'entries'", [])?;
 
         for (index, entry) in entries.iter().enumerate() {
-            let id = if remap_ids {
-                i64::try_from(index + 1).map_err(|_| StorageError::EntryIdOutOfRange(i64::MAX))?
-            } else {
-                entry.id
-            };
+            let id = remapped_ids.as_ref().map_or(entry.id, |ids| ids[index]);
             let revision = next_revision(&tx)?;
             tx.execute(
                 "INSERT INTO entries (id, title, body, created_at, updated_at, revision)
@@ -786,6 +797,54 @@ mod tests {
             .unwrap();
         let entries = storage.list_entries().unwrap();
         assert_eq!(entries[0].id, first.id);
+    }
+
+    #[test]
+    fn update_removes_unused_tags() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let created = seed(&mut storage, "Tagged", "work, personal");
+
+        storage
+            .update_entry(
+                created.id,
+                created.revision,
+                &validated("Tagged", "Body text", "work"),
+            )
+            .unwrap();
+
+        assert_eq!(storage.all_tags().unwrap(), vec!["work".to_owned()]);
+    }
+
+    #[test]
+    fn remapping_preserves_tied_timestamp_order() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let now = Utc::now();
+        let entries = vec![
+            JournalEntry {
+                id: MAX_SAFE_RESTORE_ID + 500,
+                revision: 0,
+                title: "High id".into(),
+                body: String::new(),
+                created_at: now,
+                updated_at: now,
+                tags: Vec::new(),
+            },
+            JournalEntry {
+                id: MAX_SAFE_RESTORE_ID + 100,
+                revision: 0,
+                title: "Low id".into(),
+                body: String::new(),
+                created_at: now,
+                updated_at: now,
+                tags: Vec::new(),
+            },
+        ];
+
+        storage.replace_all_entries(&entries).unwrap();
+        let loaded = storage.list_entries().unwrap();
+        assert_eq!(loaded[0].title, "High id");
+        assert_eq!(loaded[0].id, 2);
+        assert_eq!(loaded[1].id, 1);
     }
 
     #[test]

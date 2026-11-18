@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{normalize_tags, EntryDraft, JournalEntry};
+use crate::model::{format_timestamp, normalize_tags, parse_timestamp, EntryDraft, JournalEntry};
 use crate::storage::{Storage, StorageError};
 
 pub const BACKUP_FORMAT: &str = "e-journal-backup";
@@ -96,6 +96,19 @@ impl BackupEntry {
                 index,
                 message: "entry id must be a positive number".into(),
             });
+        }
+
+        for (field, timestamp) in [
+            ("created_at", self.created_at),
+            ("updated_at", self.updated_at),
+        ] {
+            let formatted = format_timestamp(timestamp);
+            if parse_timestamp(&formatted).ok() != Some(timestamp) {
+                return Err(BackupError::InvalidEntry {
+                    index,
+                    message: format!("{field} is outside the supported timestamp range"),
+                });
+            }
         }
 
         let draft = EntryDraft {
@@ -309,6 +322,20 @@ mod tests {
         negative.id = -3;
         assert!(matches!(
             parse(&export_to_string(&[negative]).unwrap()),
+            Err(BackupError::InvalidEntry { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn timestamps_that_cannot_round_trip_are_rejected() {
+        let extreme = DateTime::parse_from_rfc3339("9999-12-31T23:59:59-14:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut invalid = entry(4, "Time", &[]);
+        invalid.created_at = extreme;
+        invalid.updated_at = extreme;
+        assert!(matches!(
+            parse(&export_to_string(&[invalid]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
     }

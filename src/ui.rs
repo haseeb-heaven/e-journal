@@ -1,7 +1,7 @@
 //! egui application shell: journal list, editor, themes, and user feedback.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Local, Utc};
 use eframe::CreationContext;
@@ -535,6 +535,17 @@ impl EJournalApp {
         }
     }
 
+    fn has_stale_revision(&self) -> bool {
+        match (self.selected_id, self.base_revision) {
+            (Some(id), Some(base_revision)) => self
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| entry.revision != base_revision),
+            _ => false,
+        }
+    }
+
     fn request_switch(&mut self, target: EditorTarget) {
         if self.current_target() == Some(target) {
             return;
@@ -668,10 +679,18 @@ impl EJournalApp {
                 self.reload_data();
             }
             Err(StorageError::Conflict(_)) => {
-                self.reload_data();
-                self.notice = Some(Notice::error(
-                    "That entry changed before it was deleted. Review it and confirm again.",
-                ));
+                let refresh = self.refresh_data();
+                let message = match refresh {
+                    Ok(()) => {
+                        "That entry changed before it was deleted. Review it and confirm again."
+                            .to_owned()
+                    }
+                    Err(error) => format!(
+                        "That entry changed before it was deleted. The journal list could \
+                         not refresh: {error}. Review the entry before confirming again."
+                    ),
+                };
+                self.notice = Some(Notice::error(message));
             }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
@@ -734,6 +753,14 @@ impl EJournalApp {
         else {
             return;
         };
+
+        if export_destination_is_database(&path, &self.db_path) {
+            self.notice = Some(Notice::error(
+                "Choose a different file. That path is the active journal database or one \
+                 of its SQLite sidecar files.",
+            ));
+            return;
+        }
 
         match backup::write_backup(&path, &entries) {
             Ok(()) => {
@@ -846,10 +873,10 @@ impl EJournalApp {
                 }
             }
             Action::Revert => {
-                if self.is_dirty() {
+                if self.is_dirty() || self.has_stale_revision() {
                     self.modal = Some(Modal::ConfirmRevert);
                 } else {
-                    self.notice = Some(Notice::info("There are no unsaved changes to revert."));
+                    self.notice = Some(Notice::info("There are no changes to revert."));
                 }
             }
             Action::ConfirmRevert => {
@@ -1467,6 +1494,7 @@ impl EJournalApp {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let dirty = self.is_dirty();
+                let can_revert = dirty || self.has_stale_revision();
                 let save = ui.add_enabled(
                     dirty,
                     Button::new(RichText::new("Save").strong().color(if dirty {
@@ -1481,7 +1509,7 @@ impl EJournalApp {
                 if save.clicked() {
                     actions.push(Action::Save);
                 }
-                if dirty
+                if can_revert
                     && ui
                         .add(
                             Button::new(RichText::new("Revert").small().color(palette.weak_text))
@@ -1596,6 +1624,7 @@ impl EJournalApp {
                     title,
                     revision,
                 } => {
+                    let deletes_dirty_draft = self.selected_id == Some(*id) && self.is_dirty();
                     ui.heading("Delete this entry?");
                     ui.add_space(4.0);
                     ui.add(
@@ -1605,16 +1634,33 @@ impl EJournalApp {
                         ))
                         .wrap(),
                     );
+                    if deletes_dirty_draft {
+                        ui.add_space(8.0);
+                        ui.add(
+                            Label::new(
+                                RichText::new(
+                                    "This entry also has unsaved changes in the editor. \
+                                     Deleting it will discard that draft.",
+                                )
+                                .small()
+                                .color(palette.danger),
+                            )
+                            .wrap(),
+                        );
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if deletes_dirty_draft {
+                                "Discard draft and delete"
+                            } else {
+                                "Delete entry"
+                            };
                             if ui
                                 .add(
-                                    Button::new(
-                                        RichText::new("Delete entry").color(palette.on_danger),
-                                    )
-                                    .fill(palette.danger)
-                                    .corner_radius(8),
+                                    Button::new(RichText::new(label).color(palette.on_danger))
+                                        .fill(palette.danger)
+                                        .corner_radius(8),
                                 )
                                 .clicked()
                             {
@@ -1677,25 +1723,36 @@ impl EJournalApp {
                     });
                 }
                 Modal::ConfirmRevert => {
-                    ui.heading("Discard unsaved changes?");
+                    let draft_dirty = self.is_dirty();
+                    ui.heading(if draft_dirty {
+                        "Discard unsaved changes?"
+                    } else {
+                        "Reload the latest version?"
+                    });
                     ui.add_space(4.0);
                     ui.add(
-                        Label::new(
+                        Label::new(if draft_dirty {
                             "Reverting will replace the current draft with the last saved \
-                             version. This cannot be undone.",
-                        )
+                             version. This cannot be undone."
+                        } else {
+                            "This entry changed in another window. Reload the latest saved \
+                             version to continue editing it."
+                        })
                         .wrap(),
                     );
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if draft_dirty {
+                                "Discard changes"
+                            } else {
+                                "Reload entry"
+                            };
                             if ui
                                 .add(
-                                    Button::new(
-                                        RichText::new("Discard changes").color(palette.on_danger),
-                                    )
-                                    .fill(palette.danger)
-                                    .corner_radius(8),
+                                    Button::new(RichText::new(label).color(palette.on_danger))
+                                        .fill(palette.danger)
+                                        .corner_radius(8),
                                 )
                                 .clicked()
                             {
@@ -1867,6 +1924,34 @@ fn settings_section(ui: &mut Ui, title: &str, palette: &Palette) {
     ui.add_space(2.0);
 }
 
+fn sqlite_related_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match (parent.canonicalize(), path.file_name()) {
+        (Ok(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+fn export_destination_is_database(path: &Path, db_path: &Path) -> bool {
+    ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
+        let candidate = sqlite_related_path(db_path, suffix);
+        same_file::is_same_file(path, &candidate)
+            .unwrap_or_else(|_| normalized_path(path) == normalized_path(&candidate))
+    })
+}
+
 fn primary_button(ui: &mut Ui, label: &str, palette: &Palette, width: f32) -> Response {
     ui.add_sized(
         [width, 34.0],
@@ -1961,6 +2046,8 @@ fn format_list_date(timestamp: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -2098,6 +2185,63 @@ mod tests {
             app.notice.as_ref().map(|notice| &notice.kind),
             Some(NoticeKind::Info)
         ));
+    }
+
+    #[test]
+    fn export_rejects_database_and_sidecar_paths() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("journal.sqlite3");
+        std::fs::write(&db_path, "database").unwrap();
+
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let candidate = sqlite_related_path(&db_path, suffix);
+            if !suffix.is_empty() {
+                std::fs::write(&candidate, "sidecar").unwrap();
+            }
+            assert!(export_destination_is_database(&candidate, &db_path));
+        }
+
+        assert!(!export_destination_is_database(
+            &dir.path().join("backup.json"),
+            &db_path
+        ));
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("linked-backup.json");
+            std::os::unix::fs::symlink(&db_path, &link).unwrap();
+            assert!(export_destination_is_database(&link, &db_path));
+        }
+    }
+
+    #[test]
+    fn stale_but_identical_entry_can_be_reloaded() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let original = app.entries[0].clone();
+
+        let same_content = EntryDraft {
+            title: original.title.clone(),
+            body: original.body.clone(),
+            tags_text: original.tags.join(", "),
+        }
+        .validate()
+        .unwrap();
+        app.storage
+            .update_entry(id, original.revision, &same_content)
+            .unwrap();
+        app.refresh_data().unwrap();
+
+        assert!(!app.is_dirty());
+        assert!(app.has_stale_revision());
+
+        app.apply_action(&ctx, Action::Revert);
+        assert!(matches!(app.modal, Some(Modal::ConfirmRevert)));
+        app.apply_action(&ctx, Action::ConfirmRevert);
+        assert!(!app.has_stale_revision());
     }
 
     #[test]

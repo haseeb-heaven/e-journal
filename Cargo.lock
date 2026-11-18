@@ -860,6 +860,7 @@ dependencies = [
  "predicates",
  "rfd",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",
