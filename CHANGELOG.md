@@ -59,8 +59,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   active journal rather than from every backup.
 - A draft stays open as a new entry when its entry was deleted by another app
   instance.
-- Imported tags are validated as individual values instead of being silently
-  split on commas by the editor's tag text format.
+- Tags are escaped losslessly between the editor and storage, so importing or
+  editing an entry with a literal comma in a tag no longer splits it into
+  multiple tags.
 - Imports remap unsafe high entry IDs to leave SQLite sequence headroom, reset
   the sequence after restore, preserve timestamp tie ordering, reject timestamps
   that cannot round-trip through storage, and accept valid backups whose
@@ -78,7 +79,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately, and failed settings writes are
-  reported and can be retried by selecting the same option again.
+  reported and can be retried by selecting the same option again. A failed
+  startup-preference write shows a retry control instead of requiring two
+  toggles.
 - Sidebar rows expose the full entry title and selected state to accessibility
   APIs instead of painting an unlabeled clickable rectangle.
 - Search prepares query terms once, skips text folding for empty queries, filters

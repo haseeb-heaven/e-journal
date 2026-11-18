@@ -127,8 +127,8 @@ pub fn normalize_tags(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut tags = Vec::new();
 
-    for raw in input.split(',') {
-        let Some(tag) = normalize_tag(raw) else {
+    for raw in split_tag_text(input) {
+        let Some(tag) = normalize_tag(&raw) else {
             continue;
         };
         if seen.insert(tag.clone()) {
@@ -137,6 +137,37 @@ pub fn normalize_tags(input: &str) -> Vec<String> {
     }
 
     tags
+}
+
+/// Split comma-separated tag text, honoring backslash escapes.
+fn split_tag_text(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+
+    for character in input.chars() {
+        if escaped {
+            match character {
+                ',' | '\\' => current.push(character),
+                _ => {
+                    current.push('\\');
+                    current.push(character);
+                }
+            }
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ',' {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    parts.push(current);
+    parts
 }
 
 /// Normalize an already-separated tag list without splitting tags on commas.
@@ -182,9 +213,21 @@ fn fold_case(input: &str) -> String {
     input.case_fold().collect()
 }
 
-/// Render tags as the comma-separated text shown in the editor.
+/// Render tags as comma-separated editor text without losing literal commas.
 pub fn tags_to_text(tags: &[String]) -> String {
-    tags.join(", ")
+    tags.iter()
+        .map(|tag| {
+            let mut escaped = String::with_capacity(tag.len());
+            for character in tag.chars() {
+                if matches!(character, ',' | '\\') {
+                    escaped.push('\\');
+                }
+                escaped.push(character);
+            }
+            escaped
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Search and tag-filter criteria shared by the UI and storage tests.
@@ -305,6 +348,22 @@ mod tests {
             tags_text: "good, bad\0tag".into(),
         };
         assert_eq!(draft.validate(), Err(ValidationError::NullInTag));
+    }
+
+    #[test]
+    fn tags_with_commas_round_trip_through_editor_text() {
+        let tags = vec![
+            "work, urgent".to_owned(),
+            "back\\slash".to_owned(),
+            "trailing\\".to_owned(),
+        ];
+
+        let text = tags_to_text(&tags);
+        assert_eq!(normalize_tags(&text), tags);
+        assert_eq!(
+            normalize_tags(r"work\, urgent, personal"),
+            vec!["work, urgent".to_owned(), "personal".to_owned()]
+        );
     }
 
     #[test]

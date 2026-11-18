@@ -21,6 +21,7 @@ cloud, and no background synchronization.
 - **Comfortable settings** — text size, startup behavior, backup controls, and an About panel.
 - **Local SQLite storage** — versioned schema, parameterized SQL, and transactional writes.
 - **Search and tags** — search titles and body text, then narrow the list by tag.
+  Tags are comma-separated; write `\,` inside a tag to keep a literal comma.
 - **Safe editing** — unsaved-change prompts when switching entries or closing the window.
 - **Confirmed deletes** — destructive actions require an explicit confirmation.
 - **JSON backup and restore** — validated before import and applied in a single transaction.
@@ -193,7 +194,7 @@ cargo build
 cargo build --release
 ```
 
-The suite currently includes **71 unit tests** and **7 process-level E2E
+The suite currently includes **73 unit tests** and **7 process-level E2E
 tests** (`assert_cmd`) covering:
 
 - entry validation, tag normalization, search, filters, and CLI parsing;

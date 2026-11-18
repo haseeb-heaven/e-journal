@@ -120,14 +120,6 @@ impl BackupEntry {
             }
         }
 
-        if self.tags.iter().any(|tag| tag.contains(',')) {
-            return Err(BackupError::InvalidEntry {
-                index,
-                message: "tags cannot contain commas because the editor uses                           comma-separated tags"
-                    .into(),
-            });
-        }
-
         let tags = normalize_tag_list(&self.tags);
         let validated = validate_parts(&self.title, &self.body, tags).map_err(|error| {
             BackupError::InvalidEntry {
@@ -335,15 +327,12 @@ mod tests {
     }
 
     #[test]
-    fn imported_tags_are_not_split_on_commas() {
+    fn imported_tags_keep_literal_commas() {
         let entries = vec![entry(1, "Comma tags", &["Work, Urgent"])];
 
-        let error = parse(&export_to_string(&entries).unwrap()).unwrap_err();
+        let parsed = parse(&export_to_string(&entries).unwrap()).unwrap();
 
-        assert!(matches!(
-            error,
-            BackupError::InvalidEntry { message, .. } if message.contains("commas")
-        ));
+        assert_eq!(parsed[0].tags, vec!["work, urgent".to_owned()]);
     }
 
     #[test]

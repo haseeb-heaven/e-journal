@@ -1467,6 +1467,16 @@ impl EJournalApp {
                 {
                     actions.push(Action::SetOpenRecent(open_recent));
                 }
+                if self.pending_open_recent == Some(self.open_recent)
+                    && ui
+                        .small_button("Retry saving")
+                        .on_hover_text(
+                            "The preference is active for this session but was not saved.",
+                        )
+                        .clicked()
+                {
+                    actions.push(Action::SetOpenRecent(self.open_recent));
+                }
 
                 settings_section(ui, "Your data", &palette);
                 ui.label(RichText::new("E-Journal database").color(palette.text));
@@ -1640,7 +1650,7 @@ impl EJournalApp {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("#").color(palette.accent).size(14.0));
-            ui.add(
+            let tags_editor = ui.add(
                 TextEdit::singleline(&mut self.draft.tags_text)
                     .id_salt(("tags_editor", self.editor_generation))
                     .hint_text("tags, separated by commas")
@@ -1653,6 +1663,7 @@ impl EJournalApp {
                             .inner_margin(Margin::symmetric(8, 5)),
                     ),
             );
+            tags_editor.on_hover_text("Use \\, to keep a comma inside one tag.");
         });
 
         let normalized_tags = normalize_tags(&self.draft.tags_text);
@@ -3015,6 +3026,14 @@ mod tests {
             file_name: "backup.json".into(),
             expected_revisions: Vec::new(),
         });
+        render(&mut app);
+    }
+
+    #[test]
+    fn renders_pending_setting_retry() {
+        let mut app = test_app(Theme::Warm);
+        app.tab = MainTab::Settings;
+        app.pending_open_recent = Some(app.open_recent);
         render(&mut app);
     }
 
