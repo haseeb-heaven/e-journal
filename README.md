@@ -192,13 +192,16 @@ cargo build
 cargo build --release
 ```
 
-The suite currently includes **42 unit tests** and **6 process-level E2E
+The suite currently includes **51 unit tests** and **6 process-level E2E
 tests** (`assert_cmd`) covering:
 
 - entry validation, tag normalization, search, filters, and CLI parsing;
-- schema initialization, CRUD, timestamps, settings, and transactional restore;
-- backup round-trips, malformed files, unsupported versions, and duplicate ids;
-- UI rendering in every theme, the welcome screen, new entries, and modal states;
+- schema initialization and migration, CRUD, revisions, timestamps, settings,
+  permission hardening, and transactional restore;
+- backup round-trips, malformed files, unsupported versions, duplicate ids, and
+  unsafe restored ids;
+- UI rendering in every theme, the welcome screen, new entries, modal states,
+  stale saves, delete conflicts, and draft preservation;
 - running the real binary for `--version`, `--help`, `--smoke-test`, and the
   complete create/update/export/delete/import/reopen workflow.
 

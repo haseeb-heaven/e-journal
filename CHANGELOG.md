@@ -38,22 +38,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Backups are written through a private temporary file and atomically replace
   the destination, so a failed export cannot truncate an existing backup.
 - Backup files use owner-only permissions on Unix.
-- Saves now detect when another app instance changed the entry and keep the
-  draft open instead of silently overwriting the newer version.
+- Saves use database-local revision tokens instead of timestamps, so a stale
+  editor cannot overwrite a newer save or a restored entry when the clock moves
+  backwards.
+- Delete confirmations check the revision the user saw, so a replaced entry is
+  not removed without a second confirmation.
 - A draft stays open as a new entry when its entry was deleted by another app
   instance.
-- Imports reject entry IDs that would exhaust SQLite's ID sequence and accept
-  valid backups whose timestamps predate a system clock change.
+- Imports remap unsafe high entry IDs to leave SQLite sequence headroom, reset
+  the sequence after restore, and accept valid backups whose timestamps predate
+  a system clock change.
 - The import confirmation warns before discarding an unsaved draft.
 - Save failures in switch and close confirmations are shown in the UI.
-- Exports read a consistent snapshot from the database instead of the sidebar
-  cache.
+- Exports and editor loads read entries and tags from consistent database
+  snapshots instead of mixing revisions.
+- Save results are read inside the write transaction, before it commits.
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately.
-- Search filters the cached entries, and sidebar rendering no longer scans the
-  full entry list for every row.
+- Search filters the cached entries, and the sidebar virtualizes fixed-height
+  rows instead of drawing the whole journal every frame.
 - Delete and refresh failures are reported alongside the delete result.
+- Reverting now requires confirmation before discarding a dirty draft.
+- First-launch schema creation takes an immediate write transaction, so
+  concurrent launches cannot race.
+- The journal directory and database use owner-only permissions on Unix.
+- Release builds on Windows attach CLI modes to the parent console while
+  preserving redirected output.
 - Smoke tests create unique working directories and never delete files supplied
   by the caller.
 

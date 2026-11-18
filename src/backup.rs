@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{normalize_tags, EntryDraft, JournalEntry, MAX_ENTRY_ID};
+use crate::model::{normalize_tags, EntryDraft, JournalEntry};
 use crate::storage::{Storage, StorageError};
 
 pub const BACKUP_FORMAT: &str = "e-journal-backup";
@@ -91,12 +91,10 @@ impl From<&JournalEntry> for BackupEntry {
 
 impl BackupEntry {
     fn validate(self, index: usize) -> Result<JournalEntry, BackupError> {
-        if self.id <= 0 || self.id > MAX_ENTRY_ID {
+        if self.id <= 0 {
             return Err(BackupError::InvalidEntry {
                 index,
-                message: format!(
-                    "entry id must be between 1 and {MAX_ENTRY_ID} so future entries can be created"
-                ),
+                message: "entry id must be a positive number".into(),
             });
         }
 
@@ -114,6 +112,7 @@ impl BackupEntry {
 
         Ok(JournalEntry {
             id: self.id,
+            revision: 0,
             title: validated.title,
             body: validated.body,
             created_at: self.created_at,
@@ -236,6 +235,7 @@ mod tests {
         let created = Utc.with_ymd_and_hms(2026, 11, 18, 9, 30, 0).unwrap();
         JournalEntry {
             id,
+            revision: 0,
             title: title.to_owned(),
             body: "A quiet morning.".to_owned(),
             created_at: created,
@@ -305,9 +305,10 @@ mod tests {
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
 
-        let huge = entry(MAX_ENTRY_ID + 1, "Too large", &[]);
+        let mut negative = entry(1, "Negative", &[]);
+        negative.id = -3;
         assert!(matches!(
-            parse(&export_to_string(&[huge]).unwrap()),
+            parse(&export_to_string(&[negative]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
     }
@@ -395,7 +396,12 @@ mod tests {
         let imported = vec![entry(21, "Restored", &["backup"])];
         apply_import(&mut storage, &imported).unwrap();
 
-        assert_eq!(storage.list_entries().unwrap(), imported);
+        let loaded = storage.list_entries().unwrap();
+        assert_eq!(loaded.len(), imported.len());
+        assert_eq!(loaded[0].id, imported[0].id);
+        assert!(loaded[0].revision > 0);
+        assert_eq!(loaded[0].title, imported[0].title);
+        assert_eq!(loaded[0].tags, imported[0].tags);
         assert_eq!(storage.all_tags().unwrap(), vec!["backup".to_owned()]);
     }
 }

@@ -59,10 +59,15 @@ pub fn run() -> Result<usize, SmokeError> {
             created.tags
         )));
     }
+    if storage.get_entry(created.id)?.as_ref() != Some(&created) {
+        return Err(SmokeError::Check(
+            "get_entry did not return the created entry".to_owned(),
+        ));
+    }
 
     let updated = storage.update_entry(
         created.id,
-        created.updated_at,
+        created.revision,
         &draft(
             "Smoke entry updated",
             "Updated body for the end-to-end smoke test.",
@@ -99,20 +104,20 @@ pub fn run() -> Result<usize, SmokeError> {
 
     backup::write_backup(&backup_path, &entries)?;
     let restored = backup::read_backup(&backup_path)?;
-    if restored != entries {
+    if !same_content(&restored, &entries) {
         return Err(SmokeError::Check(
             "backup round-trip changed the entry".to_owned(),
         ));
     }
 
-    if !storage.delete_entry(created.id)? || !storage.list_entries()?.is_empty() {
+    if !storage.delete_entry(created.id, updated.revision)? || !storage.list_entries()?.is_empty() {
         return Err(SmokeError::Check(
             "entry was not deleted from the database".to_owned(),
         ));
     }
 
     backup::apply_import(&mut storage, &restored)?;
-    if storage.list_entries()? != restored {
+    if !same_content(&storage.list_entries()?, &restored) {
         return Err(SmokeError::Check(
             "import did not restore the backup".to_owned(),
         ));
@@ -120,7 +125,7 @@ pub fn run() -> Result<usize, SmokeError> {
 
     drop(storage);
     let reopened = Storage::open(&db_path)?;
-    if reopened.list_entries()? != restored {
+    if !same_content(&reopened.list_entries()?, &restored) {
         return Err(SmokeError::Check(
             "entries did not persist after reopening the database".to_owned(),
         ));
@@ -132,6 +137,18 @@ pub fn run() -> Result<usize, SmokeError> {
     }
 
     Ok(restored.len())
+}
+
+fn same_content(left: &[crate::model::JournalEntry], right: &[crate::model::JournalEntry]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.id == right.id
+                && left.title == right.title
+                && left.body == right.body
+                && left.created_at == right.created_at
+                && left.updated_at == right.updated_at
+                && left.tags == right.tags
+        })
 }
 
 fn create_work_dir(parent: &std::path::Path) -> Result<PathBuf, SmokeError> {

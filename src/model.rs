@@ -22,6 +22,8 @@ pub const MAX_ENTRY_ID: EntryId = 1_000_000_000_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub id: EntryId,
+    /// Local optimistic-concurrency token. It is not portable across backups.
+    pub revision: i64,
     pub title: String,
     pub body: String,
     pub created_at: DateTime<Utc>,
@@ -195,6 +197,7 @@ mod tests {
         let created = Utc.with_ymd_and_hms(2026, 11, 18, 12, 0, 0).unwrap();
         JournalEntry {
             id: 1,
+            revision: 1,
             title: title.to_owned(),
             body: body.to_owned(),
             created_at: created,

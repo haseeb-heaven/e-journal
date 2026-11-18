@@ -23,6 +23,9 @@ enum Mode {
 }
 
 fn main() -> ExitCode {
+    #[cfg(all(windows, not(debug_assertions)))]
+    attach_parent_console();
+
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mode = match parse_mode(&args) {
         Ok(mode) => mode,
@@ -67,6 +70,66 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+/// A release build uses the Windows GUI subsystem so launching E-Journal does
+/// not open a console window. CLI modes still need a console for their output,
+/// so attach to the parent terminal when one exists. Redirected handles are
+/// left untouched so automation can still capture stdout and stderr.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_parent_console() {
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    fn missing(handle: HANDLE) -> bool {
+        handle.is_null() || handle == INVALID_HANDLE_VALUE
+    }
+
+    let stdout_missing = missing(unsafe { GetStdHandle(STD_OUTPUT_HANDLE) });
+    let stderr_missing = missing(unsafe { GetStdHandle(STD_ERROR_HANDLE) });
+    if !stdout_missing && !stderr_missing {
+        return;
+    }
+
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+        return;
+    }
+
+    let console = || -> HANDLE {
+        let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                FILE_GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        }
+    };
+
+    if stdout_missing {
+        let handle = console();
+        if handle != INVALID_HANDLE_VALUE {
+            unsafe { SetStdHandle(STD_OUTPUT_HANDLE, handle) };
+        }
+    }
+    if stderr_missing {
+        let handle = console();
+        if handle != INVALID_HANDLE_VALUE {
+            unsafe { SetStdHandle(STD_ERROR_HANDLE, handle) };
+        }
     }
 }
 

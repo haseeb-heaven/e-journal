@@ -306,11 +306,13 @@ enum Modal {
     Delete {
         id: EntryId,
         title: String,
+        revision: i64,
     },
     UnsavedSwitch {
         target: EditorTarget,
     },
     UnsavedClose,
+    ConfirmRevert,
     Import {
         entries: Vec<JournalEntry>,
         file_name: String,
@@ -330,7 +332,8 @@ enum Action {
     Export,
     Import,
     DismissNotice,
-    ConfirmDelete(EntryId),
+    ConfirmDelete(EntryId, i64),
+    ConfirmRevert,
     SaveBeforeSwitch(EditorTarget),
     DiscardAndSwitch(EditorTarget),
     SaveBeforeClose,
@@ -346,7 +349,7 @@ pub struct EJournalApp {
     visible_ids: Vec<EntryId>,
     tags: Vec<String>,
     selected_id: Option<EntryId>,
-    base_updated_at: Option<DateTime<Utc>>,
+    base_revision: Option<i64>,
     is_new: bool,
     draft: EntryDraft,
     search: String,
@@ -406,7 +409,7 @@ impl EJournalApp {
             visible_ids: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
-            base_updated_at: None,
+            base_revision: None,
             is_new: false,
             draft: EntryDraft::default(),
             search: String::new(),
@@ -458,7 +461,7 @@ impl EJournalApp {
         if let Some(id) = self.selected_id {
             if !self.entries.iter().any(|entry| entry.id == id) {
                 self.selected_id = None;
-                self.base_updated_at = None;
+                self.base_revision = None;
                 if self.draft.has_content() {
                     self.is_new = true;
                     self.notice = Some(Notice::info(
@@ -505,7 +508,7 @@ impl EJournalApp {
     fn open_entry(&mut self, id: EntryId) {
         if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
             self.selected_id = Some(id);
-            self.base_updated_at = Some(entry.updated_at);
+            self.base_revision = Some(entry.revision);
             self.is_new = false;
             self.draft = EntryDraft::from_entry(entry);
         }
@@ -548,7 +551,7 @@ impl EJournalApp {
         match target {
             EditorTarget::New => {
                 self.selected_id = None;
-                self.base_updated_at = None;
+                self.base_revision = None;
                 self.is_new = true;
                 self.draft = EntryDraft::default();
                 self.focus_title = true;
@@ -576,13 +579,12 @@ impl EJournalApp {
         let was_new = self.selected_id.is_none();
         let save_result = match self.selected_id {
             Some(id) => {
-                let Some(expected_updated_at) = self.base_updated_at else {
+                let Some(expected_revision) = self.base_revision else {
                     return Err(
                         "This entry is no longer available. Reopen it before saving.".to_owned(),
                     );
                 };
-                self.storage
-                    .update_entry(id, expected_updated_at, &validated)
+                self.storage.update_entry(id, expected_revision, &validated)
             }
             None => self.storage.create_entry(&validated),
         };
@@ -599,11 +601,27 @@ impl EJournalApp {
                      Revert to load the latest version before saving again.{refresh_message}"
                 ));
             }
+            Err(StorageError::NotFound(_)) => {
+                self.selected_id = None;
+                self.base_revision = None;
+                self.is_new = true;
+                if let Err(error) = self.refresh_data() {
+                    return Err(format!(
+                        "That entry was deleted outside E-Journal, and the journal list could \
+                         not refresh: {error}. Your draft is still open."
+                    ));
+                }
+                return Err(
+                    "That entry was deleted outside E-Journal. Your draft is still open; \
+                     choose Save again to keep it as a new entry."
+                        .to_owned(),
+                );
+            }
             Err(error) => return Err(format!("Could not save this entry: {error}")),
         };
 
         self.selected_id = Some(saved.id);
-        self.base_updated_at = Some(saved.updated_at);
+        self.base_revision = Some(saved.revision);
         self.is_new = false;
         self.draft = EntryDraft::from_entry(&saved);
 
@@ -625,12 +643,12 @@ impl EJournalApp {
         Ok(())
     }
 
-    fn delete_entry(&mut self, id: EntryId) {
-        match self.storage.delete_entry(id) {
+    fn delete_entry(&mut self, id: EntryId, revision: i64) {
+        match self.storage.delete_entry(id, revision) {
             Ok(true) => {
                 if self.selected_id == Some(id) {
                     self.selected_id = None;
-                    self.base_updated_at = None;
+                    self.base_revision = None;
                     self.is_new = false;
                     self.draft = EntryDraft::default();
                 }
@@ -649,6 +667,12 @@ impl EJournalApp {
                 self.notice = Some(Notice::error("That entry was already deleted."));
                 self.reload_data();
             }
+            Err(StorageError::Conflict(_)) => {
+                self.reload_data();
+                self.notice = Some(Notice::error(
+                    "That entry changed before it was deleted. Review it and confirm again.",
+                ));
+            }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
                     "Could not delete this entry: {error}"
@@ -662,7 +686,7 @@ impl EJournalApp {
         match backup::apply_import(&mut self.storage, &entries) {
             Ok(()) => {
                 self.selected_id = None;
-                self.base_updated_at = None;
+                self.base_revision = None;
                 self.is_new = false;
                 self.draft = EntryDraft::default();
                 match self.refresh_data() {
@@ -687,7 +711,7 @@ impl EJournalApp {
     }
 
     fn export_backup(&mut self) {
-        let entries = match self.storage.snapshot_entries() {
+        let entries = match self.storage.list_entries() {
             Ok(entries) => entries,
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
@@ -822,14 +846,22 @@ impl EJournalApp {
                 }
             }
             Action::Revert => {
+                if self.is_dirty() {
+                    self.modal = Some(Modal::ConfirmRevert);
+                } else {
+                    self.notice = Some(Notice::info("There are no unsaved changes to revert."));
+                }
+            }
+            Action::ConfirmRevert => {
+                self.modal = None;
                 if let Some(id) = self.selected_id {
                     if let Some(entry) = self.entries.iter().find(|entry| entry.id == id) {
                         self.draft = EntryDraft::from_entry(entry);
-                        self.base_updated_at = Some(entry.updated_at);
+                        self.base_revision = Some(entry.revision);
                     }
                 } else if self.is_new {
                     self.draft = EntryDraft::default();
-                    self.base_updated_at = None;
+                    self.base_revision = None;
                 }
                 self.notice = Some(Notice::info("Reverted unsaved changes."));
             }
@@ -839,6 +871,7 @@ impl EJournalApp {
                         self.modal = Some(Modal::Delete {
                             id,
                             title: entry.title.clone(),
+                            revision: entry.revision,
                         });
                     }
                 }
@@ -846,7 +879,10 @@ impl EJournalApp {
             Action::Export => self.export_backup(),
             Action::Import => self.choose_import(),
             Action::DismissNotice => self.notice = None,
-            Action::ConfirmDelete(id) => self.delete_entry(id),
+            Action::ConfirmDelete(id, revision) => {
+                self.modal = None;
+                self.delete_entry(id, revision);
+            }
             Action::SaveBeforeSwitch(target) => match self.save_current() {
                 Ok(()) => self.perform_switch(target),
                 Err(message) => self.notice = Some(Notice::error(message)),
@@ -999,14 +1035,20 @@ impl EJournalApp {
         ui.add_space(2.0);
         ui.separator();
 
-        let visible_count = self.visible_ids.len();
+        let visible_ids: HashSet<EntryId> = self.visible_ids.iter().copied().collect();
+        let visible_entries = self
+            .entries
+            .iter()
+            .filter(|entry| visible_ids.contains(&entry.id))
+            .collect::<Vec<_>>();
+        let visible_count = visible_entries.len();
         let list_height = (ui.available_height() - 88.0).max(120.0);
         ScrollArea::vertical()
             .id_salt("entry_list")
             .max_height(list_height)
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if visible_count == 0 {
+            .show_rows(ui, 62.0, visible_entries.len(), |ui, row_range| {
+                if visible_entries.is_empty() {
                     let message = if self.entries.is_empty() {
                         "No entries yet. Start with a blank page."
                     } else {
@@ -1021,12 +1063,7 @@ impl EJournalApp {
                     });
                 }
 
-                let visible_ids: HashSet<EntryId> = self.visible_ids.iter().copied().collect();
-                for entry in self
-                    .entries
-                    .iter()
-                    .filter(|entry| visible_ids.contains(&entry.id))
-                {
+                for entry in &visible_entries[row_range] {
                     let selected = !self.is_new && self.selected_id == Some(entry.id);
                     if entry_row(ui, entry, selected, &palette).clicked() {
                         actions.push(Action::Select(entry.id));
@@ -1554,7 +1591,11 @@ impl EJournalApp {
             ui.set_max_width(470.0);
 
             match &modal {
-                Modal::Delete { id, title } => {
+                Modal::Delete {
+                    id,
+                    title,
+                    revision,
+                } => {
                     ui.heading("Delete this entry?");
                     ui.add_space(4.0);
                     ui.add(
@@ -1577,7 +1618,7 @@ impl EJournalApp {
                                 )
                                 .clicked()
                             {
-                                modal_action = Some(Action::ConfirmDelete(*id));
+                                modal_action = Some(Action::ConfirmDelete(*id, *revision));
                             }
                             if ui.button("Cancel").clicked() {
                                 cancel = true;
@@ -1628,6 +1669,37 @@ impl EJournalApp {
                             }
                             if ui.button("Discard and close").clicked() {
                                 modal_action = Some(Action::DiscardAndClose);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                }
+                Modal::ConfirmRevert => {
+                    ui.heading("Discard unsaved changes?");
+                    ui.add_space(4.0);
+                    ui.add(
+                        Label::new(
+                            "Reverting will replace the current draft with the last saved \
+                             version. This cannot be undone.",
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    Button::new(
+                                        RichText::new("Discard changes").color(palette.on_danger),
+                                    )
+                                    .fill(palette.danger)
+                                    .corner_radius(8),
+                                )
+                                .clicked()
+                            {
+                                modal_action = Some(Action::ConfirmRevert);
                             }
                             if ui.button("Cancel").clicked() {
                                 cancel = true;
@@ -1919,7 +1991,7 @@ mod tests {
         app.refresh_data().unwrap();
         let id = app.entries[0].id;
         app.open_entry(id);
-        let base = app.base_updated_at.unwrap();
+        let base = app.base_revision.unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         let external = EntryDraft {
@@ -1940,8 +2012,67 @@ mod tests {
             "External edit"
         );
         assert_eq!(app.draft.title, "Stale edit");
-        assert_eq!(app.base_updated_at, Some(base));
+        assert_eq!(app.base_revision, Some(base));
         assert_eq!(app.entries[0].title, "External edit");
+    }
+
+    #[test]
+    fn saving_after_external_delete_keeps_the_draft_as_new() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        app.storage
+            .delete_entry(id, app.base_revision.unwrap())
+            .unwrap();
+        app.draft.title = "Keep this draft".into();
+
+        let error = app.save_current().unwrap_err();
+        assert!(error.contains("deleted outside E-Journal"));
+        assert_eq!(app.selected_id, None);
+        assert!(app.is_new);
+        assert_eq!(app.draft.title, "Keep this draft");
+
+        app.save_current().unwrap();
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].title, "Keep this draft");
+    }
+
+    #[test]
+    fn delete_confirmation_rejects_a_changed_entry() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        let stale_revision = app.base_revision.unwrap();
+
+        let external = EntryDraft {
+            title: "External title".into(),
+            body: "Changed after confirmation opened.".into(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage
+            .update_entry(id, stale_revision, &external)
+            .unwrap();
+
+        app.apply_action(&ctx, Action::RequestDelete);
+        let Some(Modal::Delete { revision, .. }) = app.modal.take() else {
+            panic!("delete confirmation should be open");
+        };
+        app.apply_action(&ctx, Action::ConfirmDelete(id, revision));
+
+        assert_eq!(
+            app.storage.get_entry(id).unwrap().unwrap().title,
+            "External title"
+        );
+        assert_eq!(app.entries[0].title, "External title");
+        assert!(matches!(
+            app.notice.as_ref().map(|notice| &notice.kind),
+            Some(NoticeKind::Error)
+        ));
     }
 
     #[test]
@@ -1952,7 +2083,9 @@ mod tests {
         app.open_entry(id);
         app.draft.body.push_str(" Still editing.");
 
-        app.storage.delete_entry(id).unwrap();
+        app.storage
+            .delete_entry(id, app.base_revision.unwrap())
+            .unwrap();
         app.refresh_data().unwrap();
 
         assert_eq!(app.selected_id, None);
@@ -1965,6 +2098,24 @@ mod tests {
             app.notice.as_ref().map(|notice| &notice.kind),
             Some(NoticeKind::Info)
         ));
+    }
+
+    #[test]
+    fn revert_requires_confirmation() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry(id);
+        app.draft.title = "Unsaved title".into();
+
+        app.apply_action(&ctx, Action::Revert);
+        assert!(matches!(app.modal, Some(Modal::ConfirmRevert)));
+        assert_eq!(app.draft.title, "Unsaved title");
+
+        app.apply_action(&ctx, Action::ConfirmRevert);
+        assert!(app.modal.is_none());
+        assert_eq!(app.draft.title, "A test entry");
     }
 
     #[test]
@@ -2007,7 +2158,7 @@ mod tests {
             visible_ids: Vec::new(),
             tags: Vec::new(),
             selected_id: None,
-            base_updated_at: None,
+            base_revision: None,
             is_new: false,
             draft: EntryDraft::default(),
             search: String::new(),
@@ -2071,6 +2222,7 @@ mod tests {
         app.modal = Some(Modal::Delete {
             id: 1,
             title: "A test entry".into(),
+            revision: 1,
         });
         render(&mut app);
 
