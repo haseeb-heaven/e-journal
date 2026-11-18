@@ -45,9 +45,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the active database or its SQLite sidecar files (including alternate case
   spellings on case-insensitive volumes), and empty journals can still be
   exported as empty backups.
-- Backup files use owner-only permissions on Unix. Exports and imports are
-  bounded to 64 MiB, so every backup the app writes can be restored, and
-  oversized imports stop reading instead of loading the file into memory.
+- Backup files use owner-only permissions on Unix. Imports are parsed as a
+  stream and exports are serialized directly to the temporary file, so large
+  valid journals can still be restored without loading a second full copy into
+  memory.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
   backwards.
@@ -58,6 +59,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   active journal rather than from every backup.
 - A draft stays open as a new entry when its entry was deleted by another app
   instance.
+- Imported tags are validated as individual values instead of being silently
+  split on commas by the editor's tag text format.
 - Imports remap unsafe high entry IDs to leave SQLite sequence headroom, reset
   the sequence after restore, preserve timestamp tie ordering, reject timestamps
   that cannot round-trip through storage, and accept valid backups whose
@@ -95,8 +98,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reverting now requires confirmation before discarding a dirty draft, reloads
   the latest saved entry from SQLite, and remains available when only the stored
   revision changed.
-- External saves no longer make an untouched editor look dirty, and opening an
-  entry reads its latest content and revision from SQLite.
+- External saves no longer make an untouched editor look dirty, opening an
+  entry reads its latest content and revision from SQLite, and the editor date
+  comes from the loaded draft revision instead of a possibly newer sidebar
+  cache.
 - Sidebar selections carry the revision the user saw, so a replaced entry is
   refreshed instead of opened as a different entry. Reselecting the current row
   also checks SQLite for a newer revision, and a Refresh action reloads the

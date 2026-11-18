@@ -1583,12 +1583,11 @@ impl EJournalApp {
         }
 
         let palette = self.theme.palette();
-        let selected_created_at = self.selected_id.and_then(|id| {
-            self.entries
-                .iter()
-                .find(|entry| entry.id == id)
-                .map(|entry| entry.created_at)
-        });
+        let selected_created_at = self
+            .base_entry
+            .as_ref()
+            .filter(|_| !self.is_new)
+            .map(|entry| entry.created_at);
         let has_selected_entry = selected_created_at.is_some();
 
         ui.horizontal(|ui| {

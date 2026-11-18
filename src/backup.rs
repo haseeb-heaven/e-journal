@@ -5,19 +5,19 @@
 //! itself runs in one SQLite transaction.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{format_timestamp, normalize_tags, parse_timestamp, EntryDraft, JournalEntry};
+use crate::model::{
+    format_timestamp, normalize_tag_list, parse_timestamp, validate_parts, JournalEntry,
+};
 use crate::storage::{Storage, StorageError};
 
 pub const BACKUP_FORMAT: &str = "e-journal-backup";
 pub const BACKUP_VERSION: u32 = 1;
-pub const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum BackupError {
@@ -42,12 +42,6 @@ pub enum BackupError {
         #[source]
         source: std::io::Error,
     },
-
-    #[error("The backup file at {path} is larger than the supported limit of {limit} bytes.")]
-    TooLarge { path: String, limit: u64 },
-
-    #[error("This journal is too large to export as one backup (limit {limit} bytes).")]
-    ExportTooLarge { limit: u64 },
 
     #[error("This file is not valid Journal backup JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
@@ -126,17 +120,21 @@ impl BackupEntry {
             }
         }
 
-        let draft = EntryDraft {
-            title: self.title,
-            body: self.body,
-            tags_text: self.tags.join(", "),
-        };
-        let validated = draft
-            .validate()
-            .map_err(|error| BackupError::InvalidEntry {
+        if self.tags.iter().any(|tag| tag.contains(',')) {
+            return Err(BackupError::InvalidEntry {
+                index,
+                message: "tags cannot contain commas because the editor uses                           comma-separated tags"
+                    .into(),
+            });
+        }
+
+        let tags = normalize_tag_list(&self.tags);
+        let validated = validate_parts(&self.title, &self.body, tags).map_err(|error| {
+            BackupError::InvalidEntry {
                 index,
                 message: error.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(JournalEntry {
             id: self.id,
@@ -145,26 +143,34 @@ impl BackupEntry {
             body: validated.body,
             created_at: self.created_at,
             updated_at: self.updated_at,
-            tags: normalize_tags(&validated.tags.join(", ")),
+            tags: validated.tags,
         })
     }
 }
 
-/// Encode all entries as a pretty-printed, versioned JSON backup.
-pub fn export_to_string(entries: &[JournalEntry]) -> Result<String, BackupError> {
-    let backup = BackupFile {
+fn build_backup(entries: &[JournalEntry]) -> BackupFile {
+    BackupFile {
         format: BACKUP_FORMAT.to_owned(),
         version: BACKUP_VERSION,
         exported_at: Utc::now(),
         entries: entries.iter().map(BackupEntry::from).collect(),
-    };
-    serde_json::to_string_pretty(&backup).map_err(BackupError::Serialize)
+    }
+}
+
+/// Encode all entries as a pretty-printed, versioned JSON backup.
+#[cfg(test)]
+pub fn export_to_string(entries: &[JournalEntry]) -> Result<String, BackupError> {
+    serde_json::to_string_pretty(&build_backup(entries)).map_err(BackupError::Serialize)
 }
 
 /// Validate and decode a backup, returning normalized entries ready to store.
+#[cfg(test)]
 pub fn parse(json: &str) -> Result<Vec<JournalEntry>, BackupError> {
     let backup: BackupFile = serde_json::from_str(json)?;
+    validate_backup(backup)
+}
 
+fn validate_backup(backup: BackupFile) -> Result<Vec<JournalEntry>, BackupError> {
     if backup.format != BACKUP_FORMAT {
         return Err(BackupError::UnsupportedFormat(backup.format));
     }
@@ -189,36 +195,17 @@ pub fn parse(json: &str) -> Result<Vec<JournalEntry>, BackupError> {
 }
 
 /// Read and validate a backup file. The journal database is not touched.
+///
+/// The file is parsed as a stream instead of first loading a second full copy
+/// into memory, so a valid journal of any size can be restored.
 pub fn read_backup(path: &Path) -> Result<Vec<JournalEntry>, BackupError> {
-    read_backup_with_limit(path, MAX_BACKUP_BYTES)
-}
-
-fn read_backup_with_limit(path: &Path, limit: u64) -> Result<Vec<JournalEntry>, BackupError> {
     let file = std::fs::File::open(path).map_err(|source| BackupError::ReadFile {
         path: path.display().to_string(),
         source,
     })?;
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| BackupError::ReadFile {
-            path: path.display().to_string(),
-            source,
-        })?;
-    if bytes.len() as u64 > limit {
-        return Err(BackupError::TooLarge {
-            path: path.display().to_string(),
-            limit,
-        });
-    }
-    let json = String::from_utf8(bytes).map_err(|_| BackupError::ReadFile {
-        path: path.display().to_string(),
-        source: std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the backup file is not valid UTF-8",
-        ),
-    })?;
-    parse(&json)
+    let backup: BackupFile =
+        serde_json::from_reader(std::io::BufReader::new(file)).map_err(BackupError::InvalidJson)?;
+    validate_backup(backup)
 }
 
 /// Write a backup file through a private temporary file.
@@ -226,18 +213,7 @@ fn read_backup_with_limit(path: &Path, limit: u64) -> Result<Vec<JournalEntry>, 
 /// The destination is replaced only after the complete JSON payload has been
 /// written and synced, so a failed export cannot truncate an existing backup.
 pub fn write_backup(path: &Path, entries: &[JournalEntry]) -> Result<(), BackupError> {
-    write_backup_with_limit(path, entries, MAX_BACKUP_BYTES)
-}
-
-fn write_backup_with_limit(
-    path: &Path,
-    entries: &[JournalEntry],
-    limit: u64,
-) -> Result<(), BackupError> {
-    let json = export_to_string(entries)?;
-    if json.len() as u64 > limit {
-        return Err(BackupError::ExportTooLarge { limit });
-    }
+    let backup = build_backup(entries);
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -263,9 +239,22 @@ fn write_backup_with_limit(
             })?;
     }
 
+    serde_json::to_writer_pretty(&mut temporary, &backup).map_err(|error| {
+        if error.is_io() {
+            BackupError::WriteFile {
+                path: path.display().to_string(),
+                source: std::io::Error::new(
+                    error.io_error_kind().unwrap_or(std::io::ErrorKind::Other),
+                    error.to_string(),
+                ),
+            }
+        } else {
+            BackupError::Serialize(error)
+        }
+    })?;
     temporary
-        .write_all(json.as_bytes())
-        .and_then(|()| temporary.as_file().sync_all())
+        .as_file()
+        .sync_all()
         .map_err(|source| BackupError::WriteFile {
             path: path.display().to_string(),
             source,
@@ -346,25 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn write_backup_enforces_a_size_limit() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("too-large.json");
+    fn imported_tags_are_not_split_on_commas() {
+        let entries = vec![entry(1, "Comma tags", &["Work, Urgent"])];
 
-        let error = write_backup_with_limit(&path, &[entry(1, "Large", &[])], 10).unwrap_err();
+        let error = parse(&export_to_string(&entries).unwrap()).unwrap_err();
 
-        assert!(matches!(error, BackupError::ExportTooLarge { limit: 10 }));
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn read_backup_enforces_a_size_limit() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("oversized.json");
-        std::fs::write(&path, "12345678901").unwrap();
-
-        let error = read_backup_with_limit(&path, 10).unwrap_err();
-
-        assert!(matches!(error, BackupError::TooLarge { limit: 10, .. }));
+        assert!(matches!(
+            error,
+            BackupError::InvalidEntry { message, .. } if message.contains("commas")
+        ));
     }
 
     #[test]

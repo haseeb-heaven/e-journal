@@ -71,21 +71,7 @@ impl EntryDraft {
 
     /// Validate and normalize the draft for storage.
     pub fn validate(&self) -> Result<ValidatedEntry, ValidationError> {
-        let title = self.title.trim();
-        if title.is_empty() {
-            return Err(ValidationError::EmptyTitle);
-        }
-
-        let tags = normalize_tags(&self.tags_text);
-        if tags.iter().any(|tag| tag.contains('\0')) {
-            return Err(ValidationError::NullInTag);
-        }
-
-        Ok(ValidatedEntry {
-            title: title.to_owned(),
-            body: self.body.trim_end().to_owned(),
-            tags,
-        })
+        validate_parts(&self.title, &self.body, normalize_tags(&self.tags_text))
     }
 
     /// Does this draft contain anything worth warning about?
@@ -109,6 +95,28 @@ impl EntryDraft {
     }
 }
 
+/// Validate already-normalized entry parts.
+pub fn validate_parts(
+    title: &str,
+    body: &str,
+    tags: Vec<String>,
+) -> Result<ValidatedEntry, ValidationError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(ValidationError::EmptyTitle);
+    }
+
+    if tags.iter().any(|tag| tag.contains('\0')) {
+        return Err(ValidationError::NullInTag);
+    }
+
+    Ok(ValidatedEntry {
+        title: title.to_owned(),
+        body: body.trim_end().to_owned(),
+        tags,
+    })
+}
+
 /// Normalize a comma-separated tag string.
 ///
 /// * trims surrounding whitespace and leading `#` characters
@@ -120,21 +128,49 @@ pub fn normalize_tags(input: &str) -> Vec<String> {
     let mut tags = Vec::new();
 
     for raw in input.split(',') {
-        let tag = raw
-            .trim()
-            .trim_start_matches(|character: char| character == '#' || character.is_whitespace())
-            .trim_end();
-        if tag.is_empty() {
+        let Some(tag) = normalize_tag(raw) else {
             continue;
-        }
-
-        let tag = fold_case(&tag.split_whitespace().collect::<Vec<_>>().join(" "));
+        };
         if seen.insert(tag.clone()) {
             tags.push(tag);
         }
     }
 
     tags
+}
+
+/// Normalize an already-separated tag list without splitting tags on commas.
+///
+/// This is used when restoring a backup, where each JSON array element is one
+/// complete tag rather than a fragment of the editor's comma-separated text.
+pub fn normalize_tag_list(tags: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for raw in tags {
+        let Some(tag) = normalize_tag(raw) else {
+            continue;
+        };
+        if seen.insert(tag.clone()) {
+            normalized.push(tag);
+        }
+    }
+
+    normalized
+}
+
+fn normalize_tag(raw: &str) -> Option<String> {
+    let tag = raw
+        .trim()
+        .trim_start_matches(|character: char| character == '#' || character.is_whitespace())
+        .trim_end();
+    if tag.is_empty() {
+        return None;
+    }
+
+    Some(fold_case(
+        &tag.split_whitespace().collect::<Vec<_>>().join(" "),
+    ))
 }
 
 /// Unicode-aware case folding for search and tags.
@@ -269,6 +305,23 @@ mod tests {
             tags_text: "good, bad\0tag".into(),
         };
         assert_eq!(draft.validate(), Err(ValidationError::NullInTag));
+    }
+
+    #[test]
+    fn tag_lists_are_normalized_without_splitting_commas() {
+        assert_eq!(
+            normalize_tag_list(&[
+                "#Work".to_owned(),
+                " work ".to_owned(),
+                "Home".to_owned(),
+                "Work, Urgent".to_owned(),
+            ]),
+            vec![
+                "work".to_owned(),
+                "home".to_owned(),
+                "work, urgent".to_owned()
+            ]
+        );
     }
 
     #[test]

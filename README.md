@@ -107,9 +107,10 @@ The exact path is shown in **Settings → Your data**.
 ## Backups
 
 - **Export** writes a complete, versioned JSON snapshot to a file you choose.
-- **Import** accepts backups up to 64 MiB and validates the entire file before
-  touching the database. A valid backup replaces the current journal inside one
-  SQLite transaction, so a failure leaves the existing data intact.
+- **Import** validates the entire file before touching the database and parses
+  it as a stream instead of loading a second full copy into memory. A valid
+  backup replaces the current journal inside one SQLite transaction, so a
+  failure leaves the existing data intact.
 - Backups are ordinary files under your control. This app does not synchronize
   them anywhere.
 
