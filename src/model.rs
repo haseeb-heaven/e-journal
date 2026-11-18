@@ -163,18 +163,40 @@ impl SearchFilter {
         !self.query.trim().is_empty() || self.tag.is_some()
     }
 
+    /// Normalize the query once before matching it against many entries.
+    pub fn prepare(&self) -> PreparedSearchFilter {
+        PreparedSearchFilter {
+            terms: self
+                .query
+                .split_whitespace()
+                .map(fold_case)
+                .collect::<Vec<_>>(),
+            tag: self.tag.as_ref().map(|tag| fold_case(tag.trim())),
+        }
+    }
+
     /// Match every query term against the title or body (case-insensitive) and
     /// optionally require a tag (case-insensitive).
+    #[cfg(test)]
     pub fn matches(&self, entry: &JournalEntry) -> bool {
-        let terms = self
-            .query
-            .split_whitespace()
-            .map(fold_case)
-            .collect::<Vec<_>>();
-        if !terms.is_empty() {
+        self.prepare().matches(entry)
+    }
+}
+
+/// A search filter whose query terms and tag are already case-folded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedSearchFilter {
+    terms: Vec<String>,
+    tag: Option<String>,
+}
+
+impl PreparedSearchFilter {
+    pub fn matches(&self, entry: &JournalEntry) -> bool {
+        if !self.terms.is_empty() {
             let title = fold_case(&entry.title);
             let body = fold_case(&entry.body);
-            if !terms
+            if !self
+                .terms
                 .iter()
                 .all(|term| title.contains(term) || body.contains(term))
             {
@@ -183,13 +205,10 @@ impl SearchFilter {
         }
 
         match &self.tag {
-            Some(tag) => {
-                let tag = fold_case(tag.trim());
-                entry
-                    .tags
-                    .iter()
-                    .any(|entry_tag| fold_case(entry_tag) == tag)
-            }
+            Some(tag) => entry
+                .tags
+                .iter()
+                .any(|entry_tag| fold_case(entry_tag) == *tag),
             None => true,
         }
     }

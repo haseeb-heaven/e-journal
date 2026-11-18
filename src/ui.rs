@@ -333,6 +333,7 @@ enum Action {
     RequestDelete,
     Export,
     Import,
+    Refresh,
     DismissNotice,
     ConfirmDelete(EntryId, i64),
     ConfirmRevert,
@@ -497,11 +498,12 @@ impl EJournalApp {
     }
 
     fn refresh_visible(&mut self, filter: &SearchFilter) {
+        let prepared = filter.prepare();
         self.visible_indices = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| filter.matches(entry))
+            .filter(|(_, entry)| prepared.matches(entry))
             .map(|(index, _)| index)
             .collect();
     }
@@ -807,15 +809,6 @@ impl EJournalApp {
     }
 
     fn export_backup(&mut self) {
-        let entries = match self.storage.list_entries() {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.notice = Some(Notice::error(format!(
-                    "Could not read the journal for export: {error}"
-                )));
-                return;
-            }
-        };
         let default_name = format!("journal-backup-{}.json", Local::now().format("%Y-%m-%d"));
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Journal backup", &["json"])
@@ -833,6 +826,16 @@ impl EJournalApp {
             ));
             return;
         }
+
+        let entries = match self.storage.list_entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not read the journal for export: {error}"
+                )));
+                return;
+            }
+        };
 
         match backup::write_backup(&path, &entries) {
             Ok(()) => {
@@ -961,8 +964,10 @@ impl EJournalApp {
             Action::SetTextSize(text_size) => self.set_text_size(ctx, text_size),
             Action::SetOpenRecent(open_recent) => self.set_open_recent(open_recent),
             Action::Save => {
-                if let Err(message) = self.save_current() {
-                    self.notice = Some(Notice::error(message));
+                if self.is_dirty() {
+                    if let Err(message) = self.save_current() {
+                        self.notice = Some(Notice::error(message));
+                    }
                 }
             }
             Action::Revert => {
@@ -1042,6 +1047,18 @@ impl EJournalApp {
             }
             Action::Export => self.export_backup(),
             Action::Import => self.choose_import(),
+            Action::Refresh => match self.refresh_data() {
+                Ok(()) => {
+                    if self.notice.is_none() {
+                        self.notice = Some(Notice::success("Journal refreshed."));
+                    }
+                }
+                Err(error) => {
+                    self.notice = Some(Notice::error(format!(
+                        "Could not refresh the journal: {error}"
+                    )));
+                }
+            },
             Action::DismissNotice => self.notice = None,
             Action::ConfirmDelete(id, revision) => {
                 self.modal = None;
@@ -1071,14 +1088,17 @@ impl EJournalApp {
         ctx.request_repaint();
     }
 
-    fn handle_close_request(&mut self, ctx: &egui::Context) {
+    fn handle_close_request(&mut self, ctx: &egui::Context) -> bool {
         if self.allow_close || !ctx.input(|input| input.viewport().close_requested()) {
-            return;
+            return false;
         }
 
         if self.is_dirty() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.modal = Some(Modal::UnsavedClose);
+            true
+        } else {
+            false
         }
     }
 
@@ -1091,7 +1111,7 @@ impl EJournalApp {
         let new_entry = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
         let find = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
-        if ctx.input_mut(|input| input.consume_shortcut(&save)) && self.is_dirty() {
+        if ctx.input_mut(|input| input.consume_shortcut(&save)) {
             actions.push(Action::Save);
         }
         if ctx.input_mut(|input| input.consume_shortcut(&new_entry)) {
@@ -1253,6 +1273,16 @@ impl EJournalApp {
                 .clicked()
             {
                 actions.push(Action::Import);
+            }
+            if ui
+                .add(
+                    Button::new(RichText::new("Refresh").small().color(palette.weak_text))
+                        .frame(false),
+                )
+                .on_hover_text("Reload entries and tags from the local database")
+                .clicked()
+            {
+                actions.push(Action::Refresh);
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2067,8 +2097,12 @@ impl EJournalApp {
             });
 
         // Check after the editor has processed this frame's text input so a
-        // first edit cannot be lost with the close request.
-        self.handle_close_request(&ctx);
+        // first edit cannot be lost with the close request. A pending close
+        // prompt takes priority over navigation actions queued this frame.
+        let close_pending = self.handle_close_request(&ctx);
+        if close_pending {
+            actions.clear();
+        }
         self.draw_modals(&ctx, &mut actions);
 
         for action in actions {
@@ -2188,18 +2222,34 @@ fn entry_row(ui: &mut Ui, entry: &JournalEntry, selected: bool, palette: &Palett
         }
 
         let inner = rect.shrink2(egui::vec2(12.0, 8.0));
+        let title_font = FontId::proportional(15.0);
+        let title = elide_to_width(ui, &entry.title, inner.width(), &title_font);
         ui.painter().text(
             inner.left_top(),
             Align2::LEFT_TOP,
-            elide(&entry.title, 38),
-            FontId::proportional(15.0),
+            title,
+            title_font,
             palette.text,
         );
+
+        let small_font = FontId::proportional(11.5);
+        let date_text = format_list_date(entry.updated_at);
+        let date_width_limit = if entry.tags.is_empty() {
+            inner.width()
+        } else {
+            inner.width() * 0.55
+        };
+        let date = elide_to_width(ui, &date_text, date_width_limit, &small_font);
+        let date_width = ui
+            .painter()
+            .layout_no_wrap(date.clone(), small_font.clone(), Color32::PLACEHOLDER)
+            .size()
+            .x;
         ui.painter().text(
             inner.left_bottom(),
             Align2::LEFT_BOTTOM,
-            format_list_date(entry.updated_at),
-            FontId::proportional(11.5),
+            date,
+            small_font.clone(),
             palette.weak_text,
         );
 
@@ -2211,26 +2261,54 @@ fn entry_row(ui: &mut Ui, entry: &JournalEntry, selected: bool, palette: &Palett
                 .map(|tag| format!("#{tag}"))
                 .collect::<Vec<_>>()
                 .join("  ");
-            ui.painter().text(
-                inner.right_bottom(),
-                Align2::RIGHT_BOTTOM,
-                elide(&tags, 22),
-                FontId::proportional(11.5),
-                palette.accent,
-            );
+            let available = (inner.width() - date_width - 8.0).max(0.0);
+            if available > 0.0 {
+                let tags = elide_to_width(ui, &tags, available, &small_font);
+                ui.painter().text(
+                    inner.right_bottom(),
+                    Align2::RIGHT_BOTTOM,
+                    tags,
+                    small_font,
+                    palette.accent,
+                );
+            }
         }
     }
 
     response
 }
 
-fn elide(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let truncated = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}…")
+fn elide_to_width(ui: &Ui, text: &str, max_width: f32, font_id: &FontId) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    let measure = |candidate: &str| {
+        ui.painter()
+            .layout_no_wrap(candidate.to_owned(), font_id.clone(), Color32::PLACEHOLDER)
+            .size()
+            .x
+    };
+    if measure(text) <= max_width {
+        return text.to_owned();
+    }
+
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut low = 0;
+    let mut high = characters.len();
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        let candidate = format!("{}…", characters[..middle].iter().collect::<String>());
+        if measure(&candidate) <= max_width {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    if low == 0 {
+        "…".to_owned()
     } else {
-        truncated
+        format!("{}…", characters[..low].iter().collect::<String>())
     }
 }
 
@@ -2639,6 +2717,29 @@ mod tests {
     }
 
     #[test]
+    fn refresh_action_updates_the_sidebar_and_keeps_the_draft() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.open_entry_cached(id);
+        app.draft.body.push_str(" Draft text.");
+        let external = EntryDraft {
+            title: "Saved elsewhere".into(),
+            body: String::new(),
+            tags_text: String::new(),
+        }
+        .validate()
+        .unwrap();
+        app.storage.create_entry(&external).unwrap();
+
+        app.apply_action(&ctx, Action::Refresh);
+
+        assert_eq!(app.entries.len(), 2);
+        assert!(app.draft.body.contains("Draft text."));
+    }
+
+    #[test]
     fn import_conflict_refreshes_the_visible_journal() {
         let mut app = test_app(Theme::Warm);
         app.refresh_data().unwrap();
@@ -2712,10 +2813,12 @@ mod tests {
     }
 
     #[test]
-    fn entries_are_elided_without_breaking_unicode() {
-        assert_eq!(elide("short", 10), "short");
-        assert_eq!(elide("a longer title", 4), "a lo…");
-        assert_eq!(elide("日本語のタイトル", 3), "日本語…");
+    fn renders_long_sidebar_text_without_panicking() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        app.entries[0].title = "A very long title ".repeat(12);
+        app.entries[0].tags = vec!["a-very-long-tag-name".repeat(4); 3];
+        render(&mut app);
     }
 
     fn test_app(theme: Theme) -> EJournalApp {

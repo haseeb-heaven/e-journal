@@ -266,10 +266,11 @@ impl Storage {
 
     /// Entries matching a search query and optional tag filter.
     pub fn search(&self, filter: &SearchFilter) -> Result<Vec<JournalEntry>, StorageError> {
+        let prepared = filter.prepare();
         Ok(self
             .list_entries()?
             .into_iter()
-            .filter(|entry| filter.matches(entry))
+            .filter(|entry| prepared.matches(entry))
             .collect())
     }
 

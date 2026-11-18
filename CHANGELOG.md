@@ -37,9 +37,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Backups are written through a private temporary file and atomically replace
   the destination, so a failed export cannot truncate an existing backup.
-- Export refuses to write over the active database or its SQLite sidecar files,
-  including alternate case spellings on case-insensitive volumes, and empty
-  journals can still be exported as empty backups.
+- Export reads its snapshot after the destination is chosen, refuses to write
+  over the active database or its SQLite sidecar files (including alternate case
+  spellings on case-insensitive volumes), and empty journals can still be
+  exported as empty backups.
 - Backup files use owner-only permissions on Unix.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
@@ -66,12 +67,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
 - Theme changes apply widget visuals immediately.
-- Search skips text folding for empty queries, filters cached entries, caches
-  the matching row indices, and the sidebar virtualizes fixed-height rows instead
-  of scanning and drawing the whole journal every frame.
+- Search prepares query terms once, skips text folding for empty queries, filters
+  cached entries, caches the matching row indices, and the sidebar virtualizes
+  fixed-height rows instead of scanning and drawing the whole journal every
+  frame.
 - Journal refresh loads all entry tags in one query instead of one query per
   entry, and the editor avoids cloning the full body every frame. Tag previews
-  are height-bounded so many tags cannot push the editor controls off screen.
+  are height-bounded so many tags cannot push the editor controls off screen,
+  and sidebar labels are truncated to their measured pixel widths.
 - Delete and refresh failures are reported alongside the delete result.
 - Editing an entry removes tag names that are no longer used by any entry,
   search uses full Unicode case folding, and tags containing null characters are
@@ -84,13 +87,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry reads its latest content and revision from SQLite.
 - Sidebar selections carry the revision the user saw, so a replaced entry is
   refreshed instead of opened as a different entry. Reselecting the current row
-  also checks SQLite for a newer revision.
+  also checks SQLite for a newer revision, and a Refresh action reloads the
+  sidebar while preserving the draft.
 - Editor widgets get a fresh undo history whenever a different draft is loaded.
 - First-launch schema creation takes an immediate write transaction, so
   concurrent launches cannot race.
 - The journal directory and database use owner-only permissions on Unix.
-- The save shortcut only writes when the editor is dirty, and close requests are
-  evaluated after the editor processes that frame's text input.
+- The save shortcut only writes when the editor is dirty, and both save and close
+  requests are evaluated after the editor processes that frame's text input.
+  A pending close prompt takes priority over navigation queued in the same frame.
 - Non-Unicode command-line arguments produce a usage error instead of a panic.
 - Release builds on Windows attach CLI modes to the parent console while
   preserving redirected output.
