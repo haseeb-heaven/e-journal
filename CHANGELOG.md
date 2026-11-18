@@ -46,12 +46,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spellings on case-insensitive volumes), and empty journals can still be
   exported as empty backups.
 - Backup files use owner-only permissions on Unix. Imports are parsed as a
-  stream and exports are serialized directly to the temporary file, so large
-  valid journals can still be restored without loading a second full copy into
-  memory.
+  stream, and exports borrow entries directly from the database snapshot and
+  serialize straight to the temporary file instead of cloning every body, so
+  large valid journals can still be exported and restored without a second full
+  copy in memory.
 - Saves use database-local revision tokens instead of timestamps, so a stale
   editor cannot overwrite a newer save or a restored entry when the clock moves
-  backwards.
+  backwards. Read-then-write transactions start with an immediate write lock so
+  concurrent windows wait for the configured busy timeout instead of failing
+  with an immediate `SQLITE_BUSY`.
 - Delete confirmations check the revision the user saw, so a replaced entry is
   not removed without a second confirmation, and a stale editor must reload the
   entry before it can be deleted. The dialog warns when deletion or reloading

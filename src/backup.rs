@@ -85,17 +85,22 @@ struct BackupEntry {
     tags: Vec<String>,
 }
 
-impl From<&JournalEntry> for BackupEntry {
-    fn from(entry: &JournalEntry) -> Self {
-        Self {
-            id: entry.id,
-            title: entry.title.clone(),
-            body: entry.body.clone(),
-            created_at: entry.created_at,
-            updated_at: entry.updated_at,
-            tags: entry.tags.clone(),
-        }
-    }
+#[derive(Serialize)]
+struct BackupFileRef<'a> {
+    format: &'static str,
+    version: u32,
+    exported_at: DateTime<Utc>,
+    entries: Vec<BackupEntryRef<'a>>,
+}
+
+#[derive(Serialize)]
+struct BackupEntryRef<'a> {
+    id: i64,
+    title: &'a str,
+    body: &'a str,
+    created_at: &'a DateTime<Utc>,
+    updated_at: &'a DateTime<Utc>,
+    tags: &'a [String],
 }
 
 impl BackupEntry {
@@ -140,12 +145,22 @@ impl BackupEntry {
     }
 }
 
-fn build_backup(entries: &[JournalEntry]) -> BackupFile {
-    BackupFile {
-        format: BACKUP_FORMAT.to_owned(),
+fn build_backup(entries: &[JournalEntry]) -> BackupFileRef<'_> {
+    BackupFileRef {
+        format: BACKUP_FORMAT,
         version: BACKUP_VERSION,
         exported_at: Utc::now(),
-        entries: entries.iter().map(BackupEntry::from).collect(),
+        entries: entries
+            .iter()
+            .map(|entry| BackupEntryRef {
+                id: entry.id,
+                title: &entry.title,
+                body: &entry.body,
+                created_at: &entry.created_at,
+                updated_at: &entry.updated_at,
+                tags: &entry.tags,
+            })
+            .collect(),
     }
 }
 

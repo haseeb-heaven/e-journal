@@ -277,7 +277,9 @@ impl Storage {
     /// Insert a validated entry and its tags in one transaction.
     pub fn create_entry(&mut self, input: &ValidatedEntry) -> Result<JournalEntry, StorageError> {
         let now = format_timestamp(chrono::Utc::now());
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let revision = next_revision(&tx)?;
         tx.execute(
             "INSERT INTO entries (title, body, created_at, updated_at, revision)
@@ -305,7 +307,9 @@ impl Storage {
         expected_revision: i64,
         input: &ValidatedEntry,
     ) -> Result<JournalEntry, StorageError> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = tx
             .query_row(
                 "SELECT created_at, updated_at, revision FROM entries WHERE id = ?1",
@@ -381,7 +385,9 @@ impl Storage {
         id: EntryId,
         expected_revision: i64,
     ) -> Result<bool, StorageError> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let revision = tx
             .query_row("SELECT revision FROM entries WHERE id = ?1", [id], |row| {
                 row.get::<_, i64>(0)
@@ -439,7 +445,9 @@ impl Storage {
     /// below the storage limit; otherwise IDs are remapped to leave room for
     /// new entries. Every restored entry gets a fresh revision.
     pub fn replace_all_entries(&mut self, entries: &[JournalEntry]) -> Result<(), StorageError> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         replace_all_in_tx(&tx, entries)?;
         tx.commit()?;
         Ok(())
@@ -452,7 +460,9 @@ impl Storage {
         entries: &[JournalEntry],
         expected: &[(EntryId, i64)],
     ) -> Result<(), StorageError> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if revision_snapshot_from(&tx)? != expected {
             return Err(StorageError::JournalChanged);
         }
@@ -785,6 +795,36 @@ mod tests {
         assert!(storage.get_entry(created.id).unwrap().is_none());
         assert!(storage.all_tags().unwrap().is_empty());
         assert!(!storage.delete_entry(created.id, updated.revision).unwrap());
+    }
+
+    #[test]
+    fn concurrent_updates_wait_for_an_active_writer() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.sqlite3");
+        let mut first = Storage::open(&path).unwrap();
+        let mut second = Storage::open(&path).unwrap();
+        let held = seed(&mut first, "Held", "work");
+        let updated = seed(&mut first, "Updated", "work");
+        let replacement = validated("Updated elsewhere", "new body", "work");
+
+        let tx = first
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute("UPDATE entries SET body = 'held' WHERE id = ?1", [held.id])
+            .unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            second.update_entry(updated.id, updated.revision, &replacement)
+        });
+        started_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(250));
+        tx.commit().unwrap();
+
+        let saved = handle.join().unwrap().unwrap();
+        assert_eq!(saved.title, "Updated elsewhere");
     }
 
     #[test]
