@@ -2,7 +2,7 @@
 
 **A quiet, local-first journal for the desktop.**
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-blue)
@@ -47,7 +47,7 @@ The screenshots were captured from the running desktop application.
 ## Versioning and changelog
 
 E-Journal follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-The current release is **1.0.0**; the application version is shown in the
+The current release is **0.1.0**; the application version is shown in the
 window, in `--version`, and in **Settings → About**.
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md).
@@ -74,6 +74,22 @@ the same `eframe`/`egui` and bundled-SQLite stack.
   windowing development packages (for Debian/Ubuntu: `build-essential`,
   `pkg-config`, `libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, and
   `libxcb1-dev`).
+
+## Download
+
+Prebuilt **0.1.0** binaries are attached to the
+[latest release](https://github.com/haseeb-heaven/e-journal/releases/latest):
+
+| Platform | Download |
+| --- | --- |
+| macOS (Apple Silicon) | `e-journal-macos-arm64.zip` |
+| macOS (Intel) | `e-journal-macos-x86_64.zip` |
+| Windows x86_64 | `e-journal-windows-x86_64.zip` |
+| Linux x86_64 | `e-journal-linux-x86_64.zip` |
+
+Each archive includes the application, README, and MIT license. Release
+checksums are published as `SHA256SUMS.txt`. The macOS builds are not
+code-signed; use right-click → **Open** if Gatekeeper blocks the first launch.
 
 ## Build and run
 

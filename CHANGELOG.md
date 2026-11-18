@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-19
+## [0.1.0] - 2026-11-18
 
 ### Added
 
@@ -33,7 +33,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Application and package renamed from Journal to E-Journal. On first launch,
   an existing Journal database is opened in place when the E-Journal database
   does not exist yet; when both exist, the E-Journal database wins.
-- Versioned the first release as `1.0.0`.
+- Versioned the first release as `0.1.0`.
 
 ### Fixed
 
@@ -131,5 +131,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Smoke tests create unique working directories and never delete files supplied
   by the caller.
 
-[Unreleased]: https://github.com/haseeb-heaven/e-journal/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/haseeb-heaven/e-journal/releases/tag/v1.0.0
+[Unreleased]: https://github.com/haseeb-heaven/e-journal/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/haseeb-heaven/e-journal/releases/tag/v0.1.0

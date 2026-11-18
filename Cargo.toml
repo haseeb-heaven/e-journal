@@ -1,6 +1,6 @@
 [package]
 name = "e-journal"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "E-Journal: a local-first, single-user desktop journal built with Rust, egui, and SQLite"
 license = "MIT"

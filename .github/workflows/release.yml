@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            asset: e-journal-macos-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: e-journal-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: e-journal-windows-x86_64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: e-journal-linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
+            libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/e-journal" dist/
+          cp README.md LICENSE dist/
+          cd dist
+          zip -9 "../${{ matrix.asset }}.zip" e-journal README.md LICENSE
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/e-journal.exe" dist/
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum ./*.zip > SHA256SUMS.txt
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: E-Journal ${{ github.ref_name }}
+          body: |
+            E-Journal is a quiet, local-first desktop journal written in Rust with
+            egui and SQLite.
+
+            Downloads:
+            - macOS Apple Silicon: `e-journal-macos-arm64.zip`
+            - macOS Intel: `e-journal-macos-x86_64.zip`
+            - Windows x86_64: `e-journal-windows-x86_64.zip`
+            - Linux x86_64: `e-journal-linux-x86_64.zip`
+
+            Verify downloads with `SHA256SUMS.txt`.
+
+            macOS builds are not code-signed. If Gatekeeper blocks the app,
+            right-click it and choose **Open**, or clear the quarantine attribute
+            with `xattr -dr com.apple.quarantine e-journal`.
+          files: |
+            artifacts/*.zip
+            artifacts/SHA256SUMS.txt
+          fail_on_unmatched_files: true
