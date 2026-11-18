@@ -1,6 +1,7 @@
 //! egui application shell: journal list, editor, themes, and user feedback.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Local, Utc};
@@ -362,6 +363,9 @@ pub struct EJournalApp {
     theme: Theme,
     text_size: TextSize,
     open_recent: bool,
+    pending_theme: Option<Theme>,
+    pending_text_size: Option<TextSize>,
+    pending_open_recent: Option<bool>,
     notice: Option<Notice>,
     modal: Option<Modal>,
     focus_title: bool,
@@ -423,6 +427,9 @@ impl EJournalApp {
             theme,
             text_size,
             open_recent,
+            pending_theme: None,
+            pending_text_size: None,
+            pending_open_recent: None,
             notice,
             modal: None,
             focus_title: false,
@@ -451,7 +458,12 @@ impl EJournalApp {
 
     fn refresh_data(&mut self) -> Result<(), StorageError> {
         let entries = self.storage.list_entries()?;
-        let tags = self.storage.all_tags()?;
+        let tags = entries
+            .iter()
+            .flat_map(|entry| entry.tags.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         self.entries = entries;
         self.tags = tags;
 
@@ -900,52 +912,64 @@ impl EJournalApp {
     }
 
     fn set_theme(&mut self, ctx: &egui::Context, theme: Theme) {
-        if self.theme == theme {
+        if self.theme == theme && self.pending_theme != Some(theme) {
             return;
         }
         self.theme = theme;
         apply_theme(ctx, theme);
 
-        if let Err(error) = self
+        match self
             .storage
             .set_setting(THEME_SETTING, theme.setting_value())
         {
-            self.notice = Some(Notice::error(format!(
-                "The theme changed for this session, but it could not be saved: {error}"
-            )));
+            Ok(()) => self.pending_theme = None,
+            Err(error) => {
+                self.pending_theme = Some(theme);
+                self.notice = Some(Notice::error(format!(
+                    "The theme changed for this session, but it could not be saved: {error}"
+                )));
+            }
         }
     }
 
     fn set_text_size(&mut self, ctx: &egui::Context, text_size: TextSize) {
-        if self.text_size == text_size {
+        if self.text_size == text_size && self.pending_text_size != Some(text_size) {
             return;
         }
         self.text_size = text_size;
         ctx.set_zoom_factor(text_size.zoom_factor());
 
-        if let Err(error) = self
+        match self
             .storage
             .set_setting(TEXT_SIZE_SETTING, text_size.setting_value())
         {
-            self.notice = Some(Notice::error(format!(
-                "The text size changed for this session, but it could not be saved: {error}"
-            )));
+            Ok(()) => self.pending_text_size = None,
+            Err(error) => {
+                self.pending_text_size = Some(text_size);
+                self.notice = Some(Notice::error(format!(
+                    "The text size changed for this session, but it could not be saved: {error}"
+                )));
+            }
         }
     }
 
     fn set_open_recent(&mut self, open_recent: bool) {
-        if self.open_recent == open_recent {
+        if self.open_recent == open_recent && self.pending_open_recent != Some(open_recent) {
             return;
         }
         self.open_recent = open_recent;
 
-        if let Err(error) = self.storage.set_setting(
+        match self.storage.set_setting(
             OPEN_RECENT_SETTING,
             if open_recent { "true" } else { "false" },
         ) {
-            self.notice = Some(Notice::error(format!(
-                "The startup setting changed for this session, but it could not be saved: {error}"
-            )));
+            Ok(()) => self.pending_open_recent = None,
+            Err(error) => {
+                self.pending_open_recent = Some(open_recent);
+                self.notice = Some(Notice::error(format!(
+                    "The startup setting changed for this session, but it could not be saved: {error}"
+                )));
+            }
         }
     }
 
@@ -1047,18 +1071,28 @@ impl EJournalApp {
             }
             Action::Export => self.export_backup(),
             Action::Import => self.choose_import(),
-            Action::Refresh => match self.refresh_data() {
-                Ok(()) => {
-                    if self.notice.is_none() {
-                        self.notice = Some(Notice::success("Journal refreshed."));
+            Action::Refresh => {
+                let had_refresh_error = matches!(
+                    &self.notice,
+                    Some(notice) if matches!(notice.kind, NoticeKind::Error)
+                        && notice.message.starts_with("Could not refresh the journal:")
+                );
+                if had_refresh_error {
+                    self.notice = None;
+                }
+                match self.refresh_data() {
+                    Ok(()) => {
+                        if self.notice.is_none() {
+                            self.notice = Some(Notice::success("Journal refreshed."));
+                        }
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "Could not refresh the journal: {error}"
+                        )));
                     }
                 }
-                Err(error) => {
-                    self.notice = Some(Notice::error(format!(
-                        "Could not refresh the journal: {error}"
-                    )));
-                }
-            },
+            }
             Action::DismissNotice => self.notice = None,
             Action::ConfirmDelete(id, revision) => {
                 self.modal = None;
@@ -1805,7 +1839,7 @@ impl EJournalApp {
                     ui.add_space(4.0);
                     ui.add(
                         Label::new(format!(
-                            "“{title}” will be permanently removed from this computer. \
+                            "“{title}” will be deleted from this journal. \
                              This cannot be undone."
                         ))
                         .wrap(),
@@ -2717,6 +2751,42 @@ mod tests {
     }
 
     #[test]
+    fn pending_setting_writes_can_be_retried() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+
+        app.pending_theme = Some(Theme::Warm);
+        app.set_theme(&ctx, Theme::Warm);
+        assert!(app.pending_theme.is_none());
+        assert_eq!(
+            app.storage.get_setting(THEME_SETTING).unwrap().as_deref(),
+            Some("warm")
+        );
+
+        app.pending_text_size = Some(TextSize::Default);
+        app.set_text_size(&ctx, TextSize::Default);
+        assert!(app.pending_text_size.is_none());
+        assert_eq!(
+            app.storage
+                .get_setting(TEXT_SIZE_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("default")
+        );
+
+        app.pending_open_recent = Some(true);
+        app.set_open_recent(true);
+        assert!(app.pending_open_recent.is_none());
+        assert_eq!(
+            app.storage
+                .get_setting(OPEN_RECENT_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+    }
+
+    #[test]
     fn refresh_action_updates_the_sidebar_and_keeps_the_draft() {
         let ctx = egui::Context::default();
         let mut app = test_app(Theme::Warm);
@@ -2733,10 +2803,15 @@ mod tests {
         .unwrap();
         app.storage.create_entry(&external).unwrap();
 
+        app.notice = Some(Notice::error("Could not refresh the journal: old failure"));
         app.apply_action(&ctx, Action::Refresh);
 
         assert_eq!(app.entries.len(), 2);
         assert!(app.draft.body.contains("Draft text."));
+        assert!(matches!(
+            &app.notice,
+            Some(notice) if matches!(notice.kind, NoticeKind::Success)
+        ));
     }
 
     #[test]
@@ -2849,6 +2924,9 @@ mod tests {
             theme,
             text_size: TextSize::Default,
             open_recent: true,
+            pending_theme: None,
+            pending_text_size: None,
+            pending_open_recent: None,
             notice: None,
             modal: None,
             focus_title: false,

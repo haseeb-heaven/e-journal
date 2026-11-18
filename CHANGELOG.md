@@ -48,7 +48,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Delete confirmations check the revision the user saw, so a replaced entry is
   not removed without a second confirmation, and a stale editor must reload the
   entry before it can be deleted. The dialog warns when deletion or reloading
-  will discard an unsaved draft.
+  will discard an unsaved draft, and describes deletion as removal from the
+  active journal rather than from every backup.
 - A draft stays open as a new entry when its entry was deleted by another app
   instance.
 - Imports remap unsafe high entry IDs to leave SQLite sequence headroom, reset
@@ -66,15 +67,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Save results are read inside the write transaction, before it commits.
 - Tag normalization is idempotent, and reordered tags no longer trigger a false
   unsaved-change prompt.
-- Theme changes apply widget visuals immediately.
+- Theme changes apply widget visuals immediately, and failed settings writes are
+  reported and can be retried by selecting the same option again.
 - Search prepares query terms once, skips text folding for empty queries, filters
   cached entries, caches the matching row indices, and the sidebar virtualizes
   fixed-height rows instead of scanning and drawing the whole journal every
   frame.
-- Journal refresh loads all entry tags in one query instead of one query per
-  entry, and the editor avoids cloning the full body every frame. Tag previews
-  are height-bounded so many tags cannot push the editor controls off screen,
-  and sidebar labels are truncated to their measured pixel widths.
+- Journal refresh derives the tag list from the same entry snapshot instead of
+  a second query, and a successful retry replaces a stale refresh error while
+  preserving notices from the refresh. The editor avoids cloning the full body
+  every frame. Tag previews are height-bounded so many tags cannot push the
+  editor controls off screen, and sidebar labels are truncated to their
+  measured pixel widths.
 - Delete and refresh failures are reported alongside the delete result.
 - Editing an entry removes tag names that are no longer used by any entry,
   search uses full Unicode case folding, and tags containing null characters are

@@ -410,6 +410,7 @@ impl Storage {
     }
 
     /// All tags that are currently attached to at least one entry.
+    #[cfg(test)]
     pub fn all_tags(&self) -> Result<Vec<String>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT t.name
