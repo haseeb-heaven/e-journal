@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Local, Utc};
 use eframe::CreationContext;
@@ -15,6 +15,7 @@ use egui::{
 use crate::backup;
 use crate::model::{normalize_tags, EntryDraft, EntryId, JournalEntry, SearchFilter};
 use crate::storage::{Storage, StorageError};
+use crate::transfer;
 
 const THEME_SETTING: &str = "theme";
 const TEXT_SIZE_SETTING: &str = "text_size";
@@ -388,6 +389,21 @@ pub struct EJournalApp {
     focus_title: bool,
     focus_search: bool,
     allow_close: bool,
+    /// The browser build reads the chosen backup file in a background task.
+    #[cfg(target_arch = "wasm32")]
+    import_state: Option<std::rc::Rc<std::cell::RefCell<ImportRequestState>>>,
+    #[cfg(target_arch = "wasm32")]
+    import_pending: bool,
+}
+
+/// The result of a browser backup-file request.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct ImportRequestState {
+    finished: bool,
+    entries: Option<Vec<JournalEntry>>,
+    name: Option<String>,
+    error: Option<String>,
 }
 
 impl EJournalApp {
@@ -452,6 +468,10 @@ impl EJournalApp {
             focus_title: false,
             focus_search: false,
             allow_close: false,
+            #[cfg(target_arch = "wasm32")]
+            import_state: None,
+            #[cfg(target_arch = "wasm32")]
+            import_pending: false,
         };
 
         let loaded = app.refresh_data();
@@ -869,22 +889,6 @@ impl EJournalApp {
 
     fn export_backup(&mut self) {
         let default_name = format!("journal-backup-{}.json", Local::now().format("%Y-%m-%d"));
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Journal backup", &["json"])
-            .set_file_name(default_name)
-            .set_title("Export journal backup")
-            .save_file()
-        else {
-            return;
-        };
-
-        if export_destination_is_database(&path, &self.db_path) {
-            self.notice = Some(Notice::error(
-                "Choose a different file. That path is the active journal database or one \
-                 of its SQLite sidecar files.",
-            ));
-            return;
-        }
 
         let entries = match self.storage.list_entries() {
             Ok(entries) => entries,
@@ -896,15 +900,13 @@ impl EJournalApp {
             }
         };
 
-        match backup::write_backup(&path, &entries) {
-            Ok(()) => {
-                self.notice = Some(Notice::success(format!(
-                    "Backup exported to {}.",
-                    path.display()
-                )));
+        match transfer::export(&entries, &default_name, &self.db_path) {
+            Ok(transfer::ExportOutcome::Cancelled) => {}
+            Ok(transfer::ExportOutcome::Exported { name }) => {
+                self.notice = Some(Notice::success(format!("Backup exported to {name}.")));
             }
             Err(error) => {
-                #[cfg(unix)]
+                #[cfg(all(not(target_arch = "wasm32"), unix))]
                 if matches!(&error, backup::BackupError::SyncDirectory { .. }) {
                     self.notice = Some(Notice::error(format!(
                         "The backup file was written, but its folder could not be synced. \
@@ -919,50 +921,114 @@ impl EJournalApp {
         }
     }
 
-    fn choose_import(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Journal backup", &["json"])
-            .set_title("Import journal backup")
-            .pick_file()
-        else {
-            return;
+    /// Open the import confirmation for a validated backup.
+    fn open_import(&mut self, entries: Vec<JournalEntry>, name: String) {
+        let expected_revisions = match self.storage.revision_snapshot() {
+            Ok(revisions) => revisions,
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not read the current journal revisions, so the import \
+                     was not opened. Your journal was not changed. {error}"
+                )));
+                return;
+            }
         };
+        let refresh_error = self.refresh_data().err();
+        self.modal = Some(Modal::Import {
+            entries,
+            file_name: name,
+            expected_revisions,
+        });
+        if let Some(error) = refresh_error {
+            self.notice = Some(Notice::error(format!(
+                "Some journal entries could not be displayed, but the import \
+                 can still replace the journal: {error}"
+            )));
+        }
+    }
 
-        match backup::read_backup(&path) {
-            Ok(entries) => {
-                let expected_revisions = match self.storage.revision_snapshot() {
-                    Ok(revisions) => revisions,
-                    Err(error) => {
-                        self.notice = Some(Notice::error(format!(
-                            "Could not read the current journal revisions, so the import \
-                             was not opened. Your journal was not changed. {error}"
-                        )));
-                        return;
-                    }
-                };
-                let refresh_error = self.refresh_data().err();
-                let file_name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("backup")
-                    .to_owned();
-                self.modal = Some(Modal::Import {
-                    entries,
-                    file_name,
-                    expected_revisions,
-                });
-                if let Some(error) = refresh_error {
-                    self.notice = Some(Notice::error(format!(
-                        "Some journal entries could not be displayed, but the import \
-                         can still replace the journal: {error}"
-                    )));
-                }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn choose_import(&mut self) {
+        match transfer::import() {
+            Ok(transfer::ImportOutcome::Cancelled) => {}
+            Ok(transfer::ImportOutcome::Imported { entries, name }) => {
+                self.open_import(entries, name)
             }
             Err(error) => {
                 self.notice = Some(Notice::error(format!(
                     "Could not import that backup. Your journal was not changed. {error}"
                 )));
             }
+        }
+    }
+
+    /// The browser reads the chosen file asynchronously, so the import runs in
+    /// a task and posts the result back to the UI thread.
+    #[cfg(target_arch = "wasm32")]
+    fn choose_import(&mut self, ctx: &egui::Context) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        if self.import_pending {
+            return;
+        }
+        self.import_pending = true;
+
+        let ctx = ctx.clone();
+        let state: Rc<RefCell<ImportRequestState>> =
+            Rc::new(RefCell::new(ImportRequestState::default()));
+
+        let state_for_task = Rc::clone(&state);
+        wasm_bindgen_futures::spawn_local(async move {
+            let outcome = transfer::import().await;
+            {
+                let mut guard = state_for_task.borrow_mut();
+                match outcome {
+                    Ok(transfer::ImportOutcome::Cancelled) => {}
+                    Ok(transfer::ImportOutcome::Imported { entries, name }) => {
+                        guard.entries = Some(entries);
+                        guard.name = Some(name);
+                    }
+                    Err(error) => guard.error = Some(error.to_string()),
+                }
+                guard.finished = true;
+            }
+            ctx.request_repaint();
+        });
+
+        self.import_state = Some(state);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn finish_import(&mut self) {
+        let Some(state) = self.import_state.clone() else {
+            return;
+        };
+        let (finished, entries, name, error) = {
+            let guard = state.borrow();
+            (
+                guard.finished,
+                guard.entries.clone(),
+                guard.name.clone(),
+                guard.error.clone(),
+            )
+        };
+        // The file picker is still open; keep waiting for the task to finish.
+        if !finished {
+            return;
+        }
+
+        self.import_state = None;
+        self.import_pending = false;
+        if let Some(error) = error {
+            self.notice = Some(Notice::error(format!(
+                "Could not import that backup. Your journal was not changed. {error}"
+            )));
+            return;
+        }
+        if let Some(entries) = entries {
+            let name = name.unwrap_or_else(|| "backup".to_owned());
+            self.open_import(entries, name);
         }
     }
 
@@ -1149,7 +1215,12 @@ impl EJournalApp {
                 }
             }
             Action::Export => self.export_backup(),
-            Action::Import => self.choose_import(),
+            Action::Import => {
+                #[cfg(target_arch = "wasm32")]
+                self.choose_import(ctx);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.choose_import();
+            }
             Action::Refresh => {
                 let had_refresh_error = matches!(
                     &self.notice,
@@ -1406,12 +1477,22 @@ impl EJournalApp {
                 ui.label(RichText::new(count).small().color(palette.weak_text));
             });
         });
+        let storage_summary = if cfg!(target_arch = "wasm32") {
+            "Local only · stored in this browser"
+        } else {
+            "Local only · stored on this computer"
+        };
+        let storage_detail = if cfg!(target_arch = "wasm32") {
+            "Browser local storage for this site".to_owned()
+        } else {
+            format!("SQLite database: {}", self.db_path.display())
+        };
         ui.label(
-            RichText::new("Local only · stored on this computer")
+            RichText::new(storage_summary)
                 .small()
                 .color(palette.weak_text),
         )
-        .on_hover_text(format!("SQLite database: {}", self.db_path.display()));
+        .on_hover_text(storage_detail);
     }
 
     fn draw_central(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -2216,6 +2297,8 @@ impl EJournalApp {
 impl EJournalApp {
     fn show_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_arch = "wasm32")]
+        self.finish_import();
         let mut actions = Vec::new();
         self.handle_shortcuts(&ctx, &mut actions);
 
@@ -2301,27 +2384,30 @@ fn settings_section(ui: &mut Ui, title: &str, palette: &Palette) {
     ui.add_space(2.0);
 }
 
-fn sqlite_related_path(path: &Path, suffix: &str) -> PathBuf {
+#[cfg(not(target_arch = "wasm32"))]
+fn sqlite_related_path(path: &std::path::Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
 }
 
-fn normalized_path(path: &Path) -> PathBuf {
+#[cfg(not(target_arch = "wasm32"))]
+fn normalized_path(path: &std::path::Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
     }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."));
     match (parent.canonicalize(), path.file_name()) {
         (Ok(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
 }
 
-fn normalized_paths_match(left: &Path, right: &Path) -> bool {
+#[cfg(not(target_arch = "wasm32"))]
+fn normalized_paths_match(left: &std::path::Path, right: &std::path::Path) -> bool {
     let left = normalized_path(left);
     let right = normalized_path(right);
 
@@ -2335,7 +2421,8 @@ fn normalized_paths_match(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn export_destination_is_database(path: &Path, db_path: &Path) -> bool {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_destination_is_database(path: &std::path::Path, db_path: &std::path::Path) -> bool {
     let canonical_db = db_path.canonicalize().ok();
     std::iter::once(db_path)
         .chain(canonical_db.as_deref())
@@ -3117,6 +3204,10 @@ mod tests {
             focus_title: false,
             focus_search: false,
             allow_close: false,
+            #[cfg(target_arch = "wasm32")]
+            import_state: None,
+            #[cfg(target_arch = "wasm32")]
+            import_pending: false,
         };
         app.refresh_data().unwrap();
         if let Some(id) = app.entries.first().map(|entry| entry.id) {

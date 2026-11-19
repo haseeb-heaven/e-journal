@@ -59,6 +59,7 @@ E-Journal is a native cross-platform application. The same Rust codebase runs on
 - **macOS**
 - **Windows**
 - **Linux**
+- **The web**, as a WebAssembly build (see [Web build](#web-build))
 
 **Verification:** this release was built, tested, and manually exercised on
 macOS (Apple Silicon) with Rust stable. The screenshots above were captured
@@ -108,9 +109,45 @@ cargo build
 
 The application creates its database automatically on first launch.
 
+## Web build
+
+The same interface also runs in a browser through WebAssembly. The web build
+keeps entries in this browser's `localStorage`, so it stays local to the
+machine and needs no server-side component.
+
+### Prerequisites
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install --locked trunk
+```
+
+### Run it locally
+
+```sh
+trunk serve --open
+```
+
+`trunk` builds the `wasm32-unknown-unknown` target, generates the
+`wasm-bindgen` bindings, and serves the result on <http://127.0.0.1:8080>.
+For a static bundle:
+
+```sh
+trunk build --release
+```
+
+The bundle is written to `dist/` and can be hosted on any static file server.
+
+The web build is configured by `Trunk.toml` and built from `src/web.rs`; the
+`native` Cargo feature is disabled so the SQLite, file-dialog, and other
+desktop dependencies are left out.
+
+**Verification:** the web build was built and exercised in Chrome on macOS —
+entries were created, saved, and reloaded from browser storage.
+
 ## Where your journal lives
 
-E-Journal stores its SQLite database in the operating system's per-user
+The desktop build stores its SQLite database in the operating system's per-user
 application data directory:
 
 | Platform | Database path |
@@ -226,6 +263,14 @@ tests** (`assert_cmd`) covering:
   stale saves, delete conflicts, and draft preservation;
 - running the real binary for `--version`, `--help`, `--smoke-test`, and the
   complete create/update/export/delete/import/reopen workflow.
+
+The web build is checked separately, because it compiles a different subset of
+the crate:
+
+```sh
+cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
+trunk build --release
+```
 
 Code is reviewed with OpenQodex before release pushes.
 

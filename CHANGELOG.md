@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- WebAssembly build of the same interface that runs in a browser, built with
+  `trunk`. The web build stores the journal in the browser's `localStorage`,
+  downloads backups through the browser, and reads them back with a file input.
+- `native` Cargo feature so the desktop-only dependencies (SQLite, native file
+  dialogs, per-user data directories) are left out of the web build.
+
 ## [0.1.0] - 2026-11-18
 
 ### Added
