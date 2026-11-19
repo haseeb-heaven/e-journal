@@ -36,6 +36,13 @@ pub enum BackupError {
         source: std::io::Error,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "That destination is the journal database or one of its SQLite files: {path}. \
+         Choose a different file."
+    )]
+    UnsafeDestination { path: String },
+
     #[cfg(all(not(target_arch = "wasm32"), unix))]
     #[error("The backup was written to {path}, but its folder could not be synced: {source}")]
     SyncDirectory {

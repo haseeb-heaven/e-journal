@@ -1,8 +1,11 @@
 //! Browser storage for the WebAssembly build.
 //!
 //! This keeps the same API as the native SQLite store, but a whole journal is
-//! serialized as one versioned JSON document in `localStorage`. Revisions are
-//! still monotonic so the editor can detect concurrent saves from another tab.
+//! serialized as one versioned JSON document in `localStorage`. Every mutation
+//! re-reads that document before applying its change, which mirrors the native
+//! `TransactionBehavior::Immediate` writes: a tab holding an old snapshot
+//! cannot overwrite entries another tab saved in the meantime. Revisions stay
+//! monotonic so the editor can still detect concurrent saves.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,6 +17,11 @@ use thiserror::Error;
 use crate::model::{EntryId, JournalEntry, SearchFilter, ValidatedEntry, MAX_ENTRY_ID};
 
 const STORAGE_KEY: &str = "e-journal.web.v1";
+
+/// Restored ids above this limit are remapped so the journal keeps room to
+/// create new entries, matching the native storage policy.
+const RESTORE_ID_HEADROOM: EntryId = 1_000_000;
+const MAX_SAFE_RESTORE_ID: EntryId = MAX_ENTRY_ID - RESTORE_ID_HEADROOM;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -106,36 +114,30 @@ impl Storage {
     }
 
     pub fn create_entry(&mut self, input: &ValidatedEntry) -> Result<JournalEntry, StorageError> {
-        check_tags(&input.tags)?;
-        let now = Utc::now();
-        let max_id = self
-            .data
-            .entries
-            .iter()
-            .map(|entry| entry.id)
-            .max()
-            .unwrap_or(0);
-        let id = self.data.next_id.max(max_id.saturating_add(1));
-        if id <= 0 || id > MAX_ENTRY_ID {
-            return Err(StorageError::EntryIdOutOfRange(id));
-        }
-        let revision = self.data.next_revision.saturating_add(1);
-        let entry = JournalEntry {
-            id,
-            revision,
-            title: input.title.clone(),
-            body: input.body.clone(),
-            created_at: now,
-            updated_at: now,
-            tags: input.tags.clone(),
-        };
+        self.mutate(|data| {
+            check_tags(&input.tags)?;
+            let now = Utc::now();
+            let max_id = data.entries.iter().map(|entry| entry.id).max().unwrap_or(0);
+            let id = data.next_id.max(max_id.saturating_add(1));
+            if id <= 0 || id > MAX_ENTRY_ID {
+                return Err(StorageError::EntryIdOutOfRange(id));
+            }
+            let revision = data.next_revision.saturating_add(1);
+            let entry = JournalEntry {
+                id,
+                revision,
+                title: input.title.clone(),
+                body: input.body.clone(),
+                created_at: now,
+                updated_at: now,
+                tags: input.tags.clone(),
+            };
 
-        let mut data = self.data.clone();
-        data.next_id = id.saturating_add(1);
-        data.next_revision = revision;
-        data.entries.push(entry.clone());
-        commit(&mut self.data, data)?;
-        Ok(entry)
+            data.next_id = id.saturating_add(1);
+            data.next_revision = revision;
+            data.entries.push(entry.clone());
+            Ok(entry)
+        })
     }
 
     pub fn update_entry(
@@ -144,26 +146,34 @@ impl Storage {
         expected_revision: i64,
         input: &ValidatedEntry,
     ) -> Result<JournalEntry, StorageError> {
-        check_tags(&input.tags)?;
-        let mut data = self.data.clone();
-        let entry = data
-            .entries
-            .iter_mut()
-            .find(|entry| entry.id == id)
-            .ok_or(StorageError::NotFound(id))?;
-        if entry.revision != expected_revision {
-            return Err(StorageError::Conflict(id));
-        }
+        self.mutate(|data| {
+            check_tags(&input.tags)?;
+            let index = data
+                .entries
+                .iter()
+                .position(|entry| entry.id == id)
+                .ok_or(StorageError::NotFound(id))?;
+            let current = data.entries[index].clone();
+            if current.revision != expected_revision {
+                return Err(StorageError::Conflict(id));
+            }
 
-        entry.revision = data.next_revision.saturating_add(1);
-        entry.title = input.title.clone();
-        entry.body = input.body.clone();
-        entry.updated_at = Utc::now();
-        entry.tags = input.tags.clone();
-        data.next_revision = entry.revision;
-        let saved = entry.clone();
-        commit(&mut self.data, data)?;
-        Ok(saved)
+            let now = Utc::now().max(current.created_at).max(current.updated_at);
+            let revision = data.next_revision.saturating_add(1);
+            let updated = JournalEntry {
+                id,
+                revision,
+                title: input.title.clone(),
+                body: input.body.clone(),
+                created_at: current.created_at,
+                updated_at: now,
+                tags: input.tags.clone(),
+            };
+
+            data.next_revision = revision;
+            data.entries[index] = updated.clone();
+            Ok(updated)
+        })
     }
 
     pub fn delete_entry(
@@ -171,32 +181,24 @@ impl Storage {
         id: EntryId,
         expected_revision: i64,
     ) -> Result<bool, StorageError> {
-        let Some(index) = self.data.entries.iter().position(|entry| entry.id == id) else {
-            return Ok(false);
-        };
-        if self.data.entries[index].revision != expected_revision {
-            return Err(StorageError::Conflict(id));
-        }
-
-        let mut data = self.data.clone();
-        data.entries.remove(index);
-        commit(&mut self.data, data)?;
-        Ok(true)
+        self.mutate(|data| {
+            let Some(index) = data.entries.iter().position(|entry| entry.id == id) else {
+                return Ok(false);
+            };
+            if data.entries[index].revision != expected_revision {
+                return Err(StorageError::Conflict(id));
+            }
+            data.entries.remove(index);
+            Ok(true)
+        })
     }
 
     pub fn revision_snapshot(&self) -> Result<Vec<(EntryId, i64)>, StorageError> {
-        let mut revisions = self
-            .data
-            .entries
-            .iter()
-            .map(|entry| (entry.id, entry.revision))
-            .collect::<Vec<_>>();
-        revisions.sort_unstable_by_key(|(id, _)| *id);
-        Ok(revisions)
+        revision_snapshot_of(&self.data)
     }
 
     pub fn replace_all_entries(&mut self, entries: &[JournalEntry]) -> Result<(), StorageError> {
-        self.replace_entries(entries)
+        self.mutate(|data| replace_entries(data, entries))
     }
 
     pub fn replace_all_entries_checked(
@@ -204,10 +206,12 @@ impl Storage {
         entries: &[JournalEntry],
         expected: &[(EntryId, i64)],
     ) -> Result<(), StorageError> {
-        if self.revision_snapshot()? != expected {
-            return Err(StorageError::JournalChanged);
-        }
-        self.replace_entries(entries)
+        self.mutate(|data| {
+            if revision_snapshot_of(data)? != expected {
+                return Err(StorageError::JournalChanged);
+            }
+            replace_entries(data, entries)
+        })
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
@@ -215,37 +219,91 @@ impl Storage {
     }
 
     pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
-        let mut data = self.data.clone();
-        data.settings.insert(key.to_owned(), value.to_owned());
-        commit(&mut self.data, data)
+        self.mutate(|data| {
+            data.settings.insert(key.to_owned(), value.to_owned());
+            Ok(())
+        })
     }
 
-    fn replace_entries(&mut self, entries: &[JournalEntry]) -> Result<(), StorageError> {
-        let mut ids = std::collections::HashSet::with_capacity(entries.len());
-        let mut next_id = 1;
-        let mut replacement = Vec::with_capacity(entries.len());
+    /// Apply a change to the freshest stored journal, then persist it.
+    ///
+    /// Reading first means a tab that has been idle cannot overwrite entries
+    /// another tab saved while it was open.
+    fn mutate<T>(
+        &mut self,
+        change: impl FnOnce(&mut WebData) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let mut data = load_data()?;
+        let value = change(&mut data)?;
+        save_data(&data)?;
+        self.data = data;
+        Ok(value)
+    }
+}
 
-        for (index, entry) in entries.iter().enumerate() {
-            if entry.id <= 0 || entry.id > MAX_ENTRY_ID {
-                return Err(StorageError::EntryIdOutOfRange(entry.id));
-            }
-            if !ids.insert(entry.id) {
-                return Err(StorageError::DuplicateEntryId(entry.id));
-            }
-            check_tags(&entry.tags)?;
-            next_id = next_id.max(entry.id.saturating_add(1));
-            let mut entry = entry.clone();
-            entry.revision = i64::try_from(index + 1).unwrap_or(i64::MAX);
-            replacement.push(entry);
+fn revision_snapshot_of(data: &WebData) -> Result<Vec<(EntryId, i64)>, StorageError> {
+    let mut revisions = data
+        .entries
+        .iter()
+        .map(|entry| (entry.id, entry.revision))
+        .collect::<Vec<_>>();
+    revisions.sort_unstable_by_key(|(id, _)| *id);
+    Ok(revisions)
+}
+
+fn replace_entries(data: &mut WebData, entries: &[JournalEntry]) -> Result<(), StorageError> {
+    let mut ids = std::collections::HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if entry.id <= 0 || entry.id > MAX_ENTRY_ID {
+            return Err(StorageError::EntryIdOutOfRange(entry.id));
         }
-
-        let revision = i64::try_from(replacement.len()).unwrap_or(i64::MAX);
-        let mut data = self.data.clone();
-        data.entries = replacement;
-        data.next_id = next_id;
-        data.next_revision = revision;
-        commit(&mut self.data, data)
+        if !ids.insert(entry.id) {
+            return Err(StorageError::DuplicateEntryId(entry.id));
+        }
+        check_tags(&entry.tags)?;
     }
+
+    let remapped_ids = remap_restored_ids(entries)?;
+    let mut replacement = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let id = remapped_ids.as_ref().map_or(entry.id, |ids| ids[index]);
+        let revision = data.next_revision.saturating_add(1);
+        data.next_revision = revision;
+        replacement.push(JournalEntry {
+            id,
+            revision,
+            ..entry.clone()
+        });
+    }
+
+    let next_id = replacement
+        .iter()
+        .map(|entry| entry.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    // An empty backup keeps the existing counters so a restore cannot make
+    // future revisions repeat ones an editor may still be holding.
+    data.next_id = data.next_id.max(next_id);
+    data.entries = replacement;
+    Ok(())
+}
+
+/// Mirror the native restore policy: if any restored id would leave too little
+/// headroom for new entries, renumber every restored entry in id order.
+fn remap_restored_ids(entries: &[JournalEntry]) -> Result<Option<Vec<EntryId>>, StorageError> {
+    if !entries.iter().any(|entry| entry.id > MAX_SAFE_RESTORE_ID) {
+        return Ok(None);
+    }
+    let mut order = (0..entries.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| entries[index].id);
+    let mut ids = vec![0; entries.len()];
+    for (position, index) in order.into_iter().enumerate() {
+        ids[index] =
+            i64::try_from(position + 1).map_err(|_| StorageError::EntryIdOutOfRange(i64::MAX))?;
+    }
+    Ok(Some(ids))
 }
 
 fn check_tags(tags: &[String]) -> Result<(), StorageError> {
@@ -255,17 +313,11 @@ fn check_tags(tags: &[String]) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn commit(current: &mut WebData, data: WebData) -> Result<(), StorageError> {
-    save_data(&data)?;
-    *current = data;
-    Ok(())
-}
-
 fn local_storage() -> Result<web_sys::Storage, StorageError> {
     web_sys::window()
         .ok_or_else(|| StorageError::Browser("window is unavailable".to_owned()))?
         .local_storage()
-        .map_err(|error| StorageError::Browser(format!("{error:?}")))?
+        .map_err(|error| StorageError::Browser(js_error(&error)))?
         .ok_or_else(|| StorageError::Browser("localStorage is disabled".to_owned()))
 }
 
@@ -273,7 +325,7 @@ fn load_data() -> Result<WebData, StorageError> {
     let storage = local_storage()?;
     match storage
         .get_item(STORAGE_KEY)
-        .map_err(|error| StorageError::Browser(format!("{error:?}")))?
+        .map_err(|error| StorageError::Browser(js_error(&error)))?
     {
         Some(json) => Ok(serde_json::from_str(&json)?),
         None => Ok(WebData::default()),
@@ -284,5 +336,16 @@ fn save_data(data: &WebData) -> Result<(), StorageError> {
     let json = serde_json::to_string(data)?;
     local_storage()?
         .set_item(STORAGE_KEY, &json)
-        .map_err(|error| StorageError::Browser(format!("{error:?}")))
+        .map_err(|error| StorageError::Browser(js_error(&error)))
+}
+
+fn js_error(error: &wasm_bindgen::JsValue) -> String {
+    error
+        .as_string()
+        .or_else(|| {
+            js_sys::JSON::stringify(error)
+                .ok()
+                .and_then(|v| v.as_string())
+        })
+        .unwrap_or_else(|| "unknown browser error".to_owned())
 }

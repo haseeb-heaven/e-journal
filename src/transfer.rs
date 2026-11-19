@@ -28,9 +28,12 @@ pub enum ImportOutcome {
 }
 
 /// Export the journal to a backup file the user picks.
+///
+/// `journal` is called only after a destination is chosen, so the backup holds
+/// the state at export time rather than the state when the dialog opened.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export(
-    entries: &[JournalEntry],
+    journal: impl FnOnce() -> Result<Vec<JournalEntry>, BackupError>,
     default_name: &str,
     database_path: &std::path::Path,
 ) -> Result<ExportOutcome, BackupError> {
@@ -44,16 +47,13 @@ pub fn export(
     };
 
     if crate::ui::export_destination_is_database(&path, database_path) {
-        return Err(BackupError::ReadFile {
+        return Err(BackupError::UnsafeDestination {
             path: path.display().to_string(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "choose a different destination",
-            ),
         });
     }
 
-    backup::write_backup(&path, entries)?;
+    let entries = journal()?;
+    backup::write_backup(&path, &entries)?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -85,11 +85,12 @@ pub fn import() -> Result<ImportOutcome, BackupError> {
 /// Export the journal to a backup file the user picks.
 #[cfg(target_arch = "wasm32")]
 pub fn export(
-    entries: &[JournalEntry],
+    journal: impl FnOnce() -> Result<Vec<JournalEntry>, BackupError>,
     default_name: &str,
     _database_path: &std::path::Path,
 ) -> Result<ExportOutcome, BackupError> {
-    let json = backup::export_to_json(entries)?;
+    let entries = journal()?;
+    let json = backup::export_to_json(&entries)?;
     crate::web::download_text(default_name, &json)
         .map_err(|error| BackupError::Browser(format!("{error:?}")))?;
     Ok(ExportOutcome::Exported {

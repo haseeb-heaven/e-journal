@@ -889,18 +889,11 @@ impl EJournalApp {
 
     fn export_backup(&mut self) {
         let default_name = format!("journal-backup-{}.json", Local::now().format("%Y-%m-%d"));
+        let database_path = self.db_path.clone();
+        let storage = &self.storage;
+        let journal = || storage.list_entries().map_err(backup::BackupError::Storage);
 
-        let entries = match self.storage.list_entries() {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.notice = Some(Notice::error(format!(
-                    "Could not read the journal for export: {error}"
-                )));
-                return;
-            }
-        };
-
-        match transfer::export(&entries, &default_name, &self.db_path) {
+        match transfer::export(journal, &default_name, &database_path) {
             Ok(transfer::ExportOutcome::Cancelled) => {}
             Ok(transfer::ExportOutcome::Exported { name }) => {
                 self.notice = Some(Notice::success(format!("Backup exported to {name}.")));
@@ -2298,7 +2291,10 @@ impl EJournalApp {
     fn show_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         #[cfg(target_arch = "wasm32")]
-        self.finish_import();
+        {
+            self.finish_import();
+            crate::web::set_unsaved_changes(self.is_dirty());
+        }
         let mut actions = Vec::new();
         self.handle_shortcuts(&ctx, &mut actions);
 
