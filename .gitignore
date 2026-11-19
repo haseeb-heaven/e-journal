@@ -1,6 +1,20 @@
+# Build output and caches
 /target
-.DS_Store
+/dist
+/target/wasm-opt
+.cache/
+node_modules/
+*.profraw
+
+# Local tool data
+.openqodex/
+
+# Generated documentation
+/docs
+
+# Local journal data
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
-/dist
+
+.DS_Store
