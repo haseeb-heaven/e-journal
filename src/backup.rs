@@ -5,7 +5,6 @@
 //! itself runs in one SQLite transaction.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +20,7 @@ pub const BACKUP_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum BackupError {
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Could not read the backup file at {path}: {source}")]
     ReadFile {
         path: String,
@@ -28,6 +28,7 @@ pub enum BackupError {
         source: std::io::Error,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Could not write the backup file at {path}: {source}")]
     WriteFile {
         path: String,
@@ -35,7 +36,14 @@ pub enum BackupError {
         source: std::io::Error,
     },
 
-    #[cfg(unix)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "That destination is the journal database or one of its SQLite files: {path}. \
+         Choose a different file."
+    )]
+    UnsafeDestination { path: String },
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
     #[error("The backup was written to {path}, but its folder could not be synced: {source}")]
     SyncDirectory {
         path: String,
@@ -60,6 +68,10 @@ pub enum BackupError {
 
     #[error("The backup contains duplicate entry id {0}.")]
     DuplicateId(i64),
+
+    #[cfg(target_arch = "wasm32")]
+    #[error("The browser could not complete the backup action: {0}")]
+    Browser(String),
 
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -164,19 +176,6 @@ fn build_backup(entries: &[JournalEntry]) -> BackupFileRef<'_> {
     }
 }
 
-/// Encode all entries as a pretty-printed, versioned JSON backup.
-#[cfg(test)]
-pub fn export_to_string(entries: &[JournalEntry]) -> Result<String, BackupError> {
-    serde_json::to_string_pretty(&build_backup(entries)).map_err(BackupError::Serialize)
-}
-
-/// Validate and decode a backup, returning normalized entries ready to store.
-#[cfg(test)]
-pub fn parse(json: &str) -> Result<Vec<JournalEntry>, BackupError> {
-    let backup: BackupFile = serde_json::from_str(json)?;
-    validate_backup(backup)
-}
-
 fn validate_backup(backup: BackupFile) -> Result<Vec<JournalEntry>, BackupError> {
     if backup.format != BACKUP_FORMAT {
         return Err(BackupError::UnsupportedFormat(backup.format));
@@ -201,11 +200,23 @@ fn validate_backup(backup: BackupFile) -> Result<Vec<JournalEntry>, BackupError>
     Ok(entries)
 }
 
+/// Encode all entries as a versioned JSON backup document.
+pub fn export_to_json(entries: &[JournalEntry]) -> Result<String, BackupError> {
+    serde_json::to_string_pretty(&build_backup(entries)).map_err(BackupError::Serialize)
+}
+
+/// Validate and decode a backup document, returning normalized entries.
+pub fn parse_json(json: &str) -> Result<Vec<JournalEntry>, BackupError> {
+    let backup: BackupFile = serde_json::from_str(json)?;
+    validate_backup(backup)
+}
+
 /// Read and validate a backup file. The journal database is not touched.
 ///
 /// The file is parsed as a stream instead of first loading a second full copy
 /// into memory, so a valid journal of any size can be restored.
-pub fn read_backup(path: &Path) -> Result<Vec<JournalEntry>, BackupError> {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_backup(path: &std::path::Path) -> Result<Vec<JournalEntry>, BackupError> {
     let file = std::fs::File::open(path).map_err(|source| BackupError::ReadFile {
         path: path.display().to_string(),
         source,
@@ -219,12 +230,13 @@ pub fn read_backup(path: &Path) -> Result<Vec<JournalEntry>, BackupError> {
 ///
 /// The destination is replaced only after the complete JSON payload has been
 /// written and synced, so a failed export cannot truncate an existing backup.
-pub fn write_backup(path: &Path, entries: &[JournalEntry]) -> Result<(), BackupError> {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_backup(path: &std::path::Path, entries: &[JournalEntry]) -> Result<(), BackupError> {
     let backup = build_backup(entries);
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."));
 
     let mut temporary = tempfile::Builder::new()
         .prefix(".e-journal-backup-")
@@ -277,8 +289,11 @@ pub fn write_backup(path: &Path, entries: &[JournalEntry]) -> Result<(), BackupE
     Ok(())
 }
 
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path, path: &Path) -> Result<(), BackupError> {
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn sync_parent_directory(
+    parent: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(), BackupError> {
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| BackupError::SyncDirectory {
@@ -287,8 +302,11 @@ fn sync_parent_directory(parent: &Path, path: &Path) -> Result<(), BackupError> 
         })
 }
 
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path, _path: &Path) -> Result<(), BackupError> {
+#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+fn sync_parent_directory(
+    _parent: &std::path::Path,
+    _path: &std::path::Path,
+) -> Result<(), BackupError> {
     Ok(())
 }
 
@@ -345,7 +363,7 @@ mod tests {
     fn imported_tags_keep_literal_commas() {
         let entries = vec![entry(1, "Comma tags", &["Work, Urgent"])];
 
-        let parsed = parse(&export_to_string(&entries).unwrap()).unwrap();
+        let parsed = parse_json(&export_to_json(&entries).unwrap()).unwrap();
 
         assert_eq!(parsed[0].tags, vec!["work, urgent".to_owned()]);
     }
@@ -356,40 +374,40 @@ mod tests {
             entry(3, "First", &["personal"]),
             entry(8, "Second", &["work", "ideas"]),
         ];
-        let json = export_to_string(&entries).unwrap();
+        let json = export_to_json(&entries).unwrap();
         assert!(json.contains(BACKUP_FORMAT));
         assert!(json.contains("\"version\": 1"));
-        assert_eq!(parse(&json).unwrap(), entries);
+        assert_eq!(parse_json(&json).unwrap(), entries);
     }
 
     #[test]
     fn empty_backup_is_valid() {
-        let json = export_to_string(&[]).unwrap();
-        assert!(parse(&json).unwrap().is_empty());
+        let json = export_to_json(&[]).unwrap();
+        assert!(parse_json(&json).unwrap().is_empty());
     }
 
     #[test]
     fn rejects_unrelated_json_and_malformed_json() {
         let other = r#"{"hello":"world"}"#;
-        assert!(parse(other).is_err());
-        assert!(parse("{not json").is_err());
+        assert!(parse_json(other).is_err());
+        assert!(parse_json("{not json").is_err());
     }
 
     #[test]
     fn rejects_unsupported_format_and_version() {
-        let json = export_to_string(&[entry(1, "Title", &[])])
+        let json = export_to_json(&[entry(1, "Title", &[])])
             .unwrap()
             .replace(BACKUP_FORMAT, "some-other-app");
         assert!(matches!(
-            parse(&json),
+            parse_json(&json),
             Err(BackupError::UnsupportedFormat(_))
         ));
 
-        let json = export_to_string(&[entry(1, "Title", &[])])
+        let json = export_to_json(&[entry(1, "Title", &[])])
             .unwrap()
             .replace("\"version\": 1", "\"version\": 2");
         assert!(matches!(
-            parse(&json),
+            parse_json(&json),
             Err(BackupError::UnsupportedVersion {
                 found: 2,
                 supported: BACKUP_VERSION
@@ -401,27 +419,27 @@ mod tests {
     fn rejects_duplicate_ids_and_invalid_entries() {
         let entries = vec![entry(1, "One", &[]), entry(1, "Two", &[])];
         assert!(matches!(
-            parse(&export_to_string(&entries).unwrap()),
+            parse_json(&export_to_json(&entries).unwrap()),
             Err(BackupError::DuplicateId(1))
         ));
 
         let entries = vec![entry(2, "   ", &[])];
         assert!(matches!(
-            parse(&export_to_string(&entries).unwrap()),
+            parse_json(&export_to_json(&entries).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
 
         let mut negative = entry(1, "Negative", &[]);
         negative.id = -3;
         assert!(matches!(
-            parse(&export_to_string(&[negative]).unwrap()),
+            parse_json(&export_to_json(&[negative]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
 
         let mut null_tag = entry(6, "Null tag", &[]);
         null_tag.tags = vec!["bad\0tag".into()];
         assert!(matches!(
-            parse(&export_to_string(&[null_tag]).unwrap()),
+            parse_json(&export_to_json(&[null_tag]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
     }
@@ -435,7 +453,7 @@ mod tests {
         invalid.created_at = extreme;
         invalid.updated_at = extreme;
         assert!(matches!(
-            parse(&export_to_string(&[invalid]).unwrap()),
+            parse_json(&export_to_json(&[invalid]).unwrap()),
             Err(BackupError::InvalidEntry { index: 0, .. })
         ));
     }
@@ -444,7 +462,7 @@ mod tests {
     fn historical_timestamps_are_accepted() {
         let mut backdated = entry(4, "Time", &[]);
         backdated.updated_at = backdated.created_at - chrono::Duration::days(1);
-        let parsed = parse(&export_to_string(&[backdated.clone()]).unwrap()).unwrap();
+        let parsed = parse_json(&export_to_json(&[backdated.clone()]).unwrap()).unwrap();
         assert_eq!(parsed, vec![backdated]);
     }
 
@@ -491,7 +509,7 @@ mod tests {
             "work".to_owned(),
             " Deep   Work ".to_owned(),
         ];
-        let parsed = parse(&export_to_string(&[raw]).unwrap()).unwrap();
+        let parsed = parse_json(&export_to_json(&[raw]).unwrap()).unwrap();
         assert_eq!(parsed[0].tags, vec!["work", "deep work"]);
     }
 

@@ -7,19 +7,58 @@ license = "MIT"
 readme = "README.md"
 publish = false
 
+[lib]
+name = "e_journal"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "e-journal"
+path = "src/main.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+native = []
+
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
-directories = "6.0.0"
-eframe = "0.37.0"
+eframe = { version = "0.37.0", features = ["glow"] }
 egui = "0.37.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+unicode-casefold = "0.2.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories = "6.0.0"
 rfd = "0.18.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 same-file = "1.0.6"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
 tempfile = "3"
-thiserror = "2.0.21"
-unicode-casefold = "0.2.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "BeforeUnloadEvent",
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "Element",
+    "Event",
+    "File",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "HtmlElement",
+    "Node",
+    "Storage",
+    "Url",
+    "Window",
+] }
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -36,3 +75,10 @@ windows-sys = { version = "0.61.2", features = [
 [profile.release]
 lto = "thin"
 strip = true
+
+# `strip = true` removes the `target_features` section that wasm-bindgen and
+# wasm-opt read to detect bulk-memory and other WebAssembly features, so the
+# web build keeps its symbols and strips in a separate step if needed.
+[profile.wasm-release]
+inherits = "release"
+strip = "none"

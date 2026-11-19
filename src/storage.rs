@@ -1130,8 +1130,8 @@ mod tests {
         let new = seed(&mut storage, "After restore", "");
         assert_eq!(new.id, 2);
         assert!(new.id <= MAX_ENTRY_ID);
-        assert!(crate::backup::parse(
-            &crate::backup::export_to_string(&storage.list_entries().unwrap()).unwrap()
+        assert!(crate::backup::parse_json(
+            &crate::backup::export_to_json(&storage.list_entries().unwrap()).unwrap()
         )
         .is_ok());
     }

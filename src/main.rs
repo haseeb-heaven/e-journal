@@ -1,18 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod backup;
-mod model;
-mod smoke;
-mod storage;
-mod ui;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use directories::ProjectDirs;
+use e_journal::smoke;
+use e_journal::storage::{Storage, StorageError};
+use e_journal::ui;
 use thiserror::Error;
-
-use crate::storage::{Storage, StorageError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
