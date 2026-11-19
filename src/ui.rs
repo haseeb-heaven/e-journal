@@ -13,7 +13,9 @@ use egui::{
 };
 
 use crate::backup;
-use crate::model::{normalize_tags, EntryDraft, EntryId, JournalEntry, SearchFilter};
+use crate::model::{
+    normalize_tags, validate_parts, EntryDraft, EntryId, JournalEntry, SearchFilter,
+};
 use crate::storage::{Storage, StorageError};
 use crate::transfer;
 
@@ -350,6 +352,9 @@ enum Action {
     SaveAsNew,
     Revert,
     RequestDelete,
+    RequestDeleteEntry(EntryId),
+    DuplicateEntry(EntryId),
+    CopyEntryText(EntryId),
     Export,
     Import,
     Refresh,
@@ -793,6 +798,109 @@ impl EJournalApp {
         Ok(())
     }
 
+    /// Open the delete confirmation for an entry chosen in the list.
+    ///
+    /// The stored record is read again so the confirmation carries the current
+    /// revision, which keeps the delete working when another window edited it.
+    fn request_delete_entry(&mut self, id: EntryId) {
+        match self.storage.get_entry(id) {
+            Ok(Some(entry)) => {
+                self.modal = Some(Modal::Delete {
+                    id,
+                    title: entry.title.clone(),
+                    revision: entry.revision,
+                });
+            }
+            Ok(None) => {
+                self.notice = Some(Notice::error("That entry is no longer in the journal."));
+                self.reload_data();
+            }
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not read that entry before deleting it: {error}"
+                )));
+            }
+        }
+    }
+
+    /// Save a copy of an entry as a new one.
+    fn duplicate_entry(&mut self, id: EntryId) {
+        let source = match self.storage.get_entry(id) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                self.notice = Some(Notice::error("That entry is no longer in the journal."));
+                self.reload_data();
+                return;
+            }
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not read the entry to duplicate: {error}"
+                )));
+                return;
+            }
+        };
+
+        let title = next_copy_title(&source.title, &self.entries);
+        let validated = match validate_parts(&title, &source.body, source.tags.clone()) {
+            Ok(validated) => validated,
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not duplicate this entry: {error}"
+                )));
+                return;
+            }
+        };
+
+        match self.storage.create_entry(&validated) {
+            Ok(copy) => {
+                // Keep an unsaved draft open rather than switching away from it.
+                let keep_editor = self.is_dirty();
+                match self.refresh_data() {
+                    Ok(()) => {
+                        if keep_editor {
+                            self.notice = Some(Notice::success(format!(
+                                "Duplicated as “{}”. Your unsaved draft is still open.",
+                                copy.title
+                            )));
+                        } else {
+                            self.open_entry(copy.id, copy.revision);
+                            self.notice =
+                                Some(Notice::success(format!("Duplicated as “{}”.", copy.title)));
+                        }
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "Entry duplicated, but the journal list could not be refreshed: \
+                             {error}"
+                        )));
+                    }
+                }
+            }
+            Err(error) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not duplicate this entry: {error}"
+                )));
+            }
+        }
+    }
+
+    /// Put an entry on the clipboard as plain text.
+    fn copy_entry_text(&mut self, ctx: &egui::Context, id: EntryId) {
+        let entry = match self.entries.iter().find(|entry| entry.id == id) {
+            Some(entry) => entry.clone(),
+            None => {
+                self.notice = Some(Notice::error("That entry is no longer in the journal."));
+                self.reload_data();
+                return;
+            }
+        };
+        ctx.copy_text(entry_as_text(&entry));
+        self.notice = Some(Notice::success(format!(
+            "Copied “{}” to the clipboard.",
+            entry.title
+        )));
+    }
+
     fn delete_entry(&mut self, id: EntryId, revision: i64) {
         match self.storage.delete_entry(id, revision) {
             Ok(true) => {
@@ -1207,6 +1315,9 @@ impl EJournalApp {
                     }
                 }
             }
+            Action::RequestDeleteEntry(id) => self.request_delete_entry(id),
+            Action::DuplicateEntry(id) => self.duplicate_entry(id),
+            Action::CopyEntryText(id) => self.copy_entry_text(ctx, id),
             Action::Export => self.export_backup(),
             Action::Import => {
                 #[cfg(target_arch = "wasm32")]
@@ -1422,9 +1533,43 @@ impl EJournalApp {
                 for row in row_range {
                     let entry = &self.entries[self.visible_indices[row]];
                     let selected = !self.is_new && self.selected_id == Some(entry.id);
-                    if entry_row(ui, entry, selected, &palette).clicked() {
+                    let response = entry_row(ui, entry, selected, &palette)
+                        .on_hover_text("Right-click for more options");
+                    if response.clicked() {
                         actions.push(Action::Select(entry.id, entry.revision));
                     }
+
+                    let (id, revision) = (entry.id, entry.revision);
+                    response.context_menu(|ui| {
+                        ui.set_min_width(190.0);
+                        if ui.button("Open").clicked() {
+                            actions.push(Action::Select(id, revision));
+                            ui.close();
+                        }
+                        if ui.button("New entry").clicked() {
+                            actions.push(Action::NewEntry);
+                            ui.close();
+                        }
+                        if ui.button("Duplicate").clicked() {
+                            actions.push(Action::DuplicateEntry(id));
+                            ui.close();
+                        }
+                        if ui.button("Copy text").clicked() {
+                            actions.push(Action::CopyEntryText(id));
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add(
+                                Button::new(RichText::new("Delete…").color(palette.danger))
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            actions.push(Action::RequestDeleteEntry(id));
+                            ui.close();
+                        }
+                    });
                 }
             });
 
@@ -2380,6 +2525,55 @@ fn settings_section(ui: &mut Ui, title: &str, palette: &Palette) {
     ui.add_space(2.0);
 }
 
+/// Build a copy title that does not collide with an existing entry.
+fn next_copy_title(title: &str, entries: &[JournalEntry]) -> String {
+    let base = strip_copy_suffix(title.trim());
+    let mut candidate = format!("{base} copy");
+    let mut index = 2;
+    while entries.iter().any(|entry| entry.title == candidate) {
+        candidate = format!("{base} copy {index}");
+        index += 1;
+        if index > 100 {
+            break;
+        }
+    }
+    candidate
+}
+
+/// Remove a trailing "copy" marker so duplicating a copy stays readable.
+fn strip_copy_suffix(title: &str) -> &str {
+    if let Some(base) = title.strip_suffix(" copy") {
+        return base;
+    }
+    if let Some(position) = title.rfind(" copy ") {
+        let tail = &title[position + " copy ".len()..];
+        if !tail.is_empty() && tail.chars().all(|character| character.is_ascii_digit()) {
+            return &title[..position];
+        }
+    }
+    title
+}
+
+/// Render an entry as plain text for the clipboard.
+fn entry_as_text(entry: &JournalEntry) -> String {
+    let mut text = entry.title.clone();
+    if !entry.body.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(&entry.body);
+    }
+    if !entry.tags.is_empty() {
+        text.push_str("\n\n");
+        let tags = entry
+            .tags
+            .iter()
+            .map(|tag| format!("#{tag}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.push_str(&tags);
+    }
+    text
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn sqlite_related_path(path: &std::path::Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -2597,6 +2791,134 @@ mod tests {
         }
         assert_eq!(TextSize::from_setting(None), TextSize::Default);
         assert_eq!(TextSize::from_setting(Some("unknown")), TextSize::Default);
+    }
+
+    #[test]
+    fn context_menu_duplicate_creates_a_copy() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let source = app.entries[0].clone();
+
+        app.duplicate_entry(source.id);
+
+        assert_eq!(app.entries.len(), 2);
+        let copy = app
+            .entries
+            .iter()
+            .find(|entry| entry.id != source.id)
+            .expect("duplicated entry");
+        assert_eq!(copy.title, "A test entry copy");
+        assert_eq!(copy.body, source.body);
+        assert_eq!(copy.tags, source.tags);
+        assert_eq!(app.selected_id, Some(copy.id));
+        assert!(matches!(
+            &app.notice,
+            Some(notice) if matches!(notice.kind, NoticeKind::Success)
+        ));
+    }
+
+    #[test]
+    fn duplicating_a_copy_keeps_titles_distinct() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let source = app.entries[0].id;
+
+        app.duplicate_entry(source);
+        let first_copy = app.entries.iter().find(|e| e.id != source).unwrap().id;
+        app.duplicate_entry(first_copy);
+
+        let mut titles = app
+            .entries
+            .iter()
+            .map(|entry| entry.title.clone())
+            .collect::<Vec<_>>();
+        titles.sort();
+        assert_eq!(
+            titles,
+            vec![
+                "A test entry".to_owned(),
+                "A test entry copy".to_owned(),
+                "A test entry copy 2".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicating_keeps_an_unsaved_draft_open() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let source = app.entries[0].id;
+        app.open_entry_cached(source);
+        app.draft.body.push_str(" Unsaved edit.");
+
+        app.duplicate_entry(source);
+
+        assert_eq!(app.entries.len(), 2);
+        assert_eq!(app.selected_id, Some(source));
+        assert_eq!(
+            app.draft.body,
+            "Some body text for the renderer. Unsaved edit."
+        );
+        assert!(matches!(
+            &app.notice,
+            Some(notice) if matches!(notice.kind, NoticeKind::Success)
+        ));
+    }
+
+    #[test]
+    fn context_menu_delete_opens_confirmation_for_that_entry() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+
+        app.apply_action(&ctx, Action::RequestDeleteEntry(id));
+
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Delete { id: modal_id, .. }) if *modal_id == id
+        ));
+
+        app.apply_action(&ctx, Action::ConfirmDelete(id, app.entries[0].revision));
+        assert!(app.entries.is_empty());
+        assert_eq!(app.selected_id, None);
+    }
+
+    #[test]
+    fn context_menu_delete_ignores_a_deleted_entry() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let id = app.entries[0].id;
+        app.storage
+            .delete_entry(id, app.entries[0].revision)
+            .unwrap();
+
+        app.request_delete_entry(id);
+
+        assert!(app.modal.is_none());
+        assert!(matches!(
+            &app.notice,
+            Some(notice) if matches!(notice.kind, NoticeKind::Error)
+        ));
+        assert!(app.entries.is_empty());
+    }
+
+    #[test]
+    fn entry_text_for_the_clipboard_includes_tags() {
+        let mut app = test_app(Theme::Warm);
+        app.refresh_data().unwrap();
+        let text = entry_as_text(&app.entries[0]);
+        assert!(text.starts_with("A test entry\n\nSome body text"));
+        assert!(text.contains("#testing"));
+        assert!(text.contains("#journal"));
+    }
+
+    #[test]
+    fn copy_titles_strip_an_existing_copy_suffix() {
+        assert_eq!(strip_copy_suffix("Notes copy"), "Notes");
+        assert_eq!(strip_copy_suffix("Notes copy 3"), "Notes");
+        assert_eq!(strip_copy_suffix("Notes copycat"), "Notes copycat");
+        assert_eq!(next_copy_title("Notes", &[]), "Notes copy");
     }
 
     #[test]

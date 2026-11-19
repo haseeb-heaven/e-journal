@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Right-click context menu on every entry in the list with open, new entry,
+  duplicate, copy text, and delete actions.
+- Duplicate an entry into a new one with a distinct `copy` title, keeping an
+  unsaved draft open instead of switching away from it.
+- Copy an entry's title, body, and tags to the clipboard as plain text.
+- Delete an entry directly from its context menu, with the same confirmation
+  and draft warnings as the editor's delete action.
+
 - WebAssembly build of the same interface that runs in a browser, built with
   `trunk`. The web build stores the journal in the browser's `localStorage`,
   downloads backups through the browser, and reads them back with a file input.

@@ -23,6 +23,8 @@ cloud, and no background synchronization.
 - **Search and tags** — search titles and body text, then narrow the list by tag.
   Tags are comma-separated; write `\,` inside a tag to keep a literal comma.
 - **Safe editing** — unsaved-change prompts when switching entries or closing the window.
+- **Right-click entry actions** — open, create, duplicate, copy text, or delete any
+  entry from its context menu in the list.
 - **Confirmed deletes** — destructive actions require an explicit confirmation.
 - **JSON backup and restore** — validated before import and applied in a single transaction.
 - **Visible failures** — save, database, and backup errors are reported in the UI instead of being swallowed.
